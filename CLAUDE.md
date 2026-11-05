@@ -28,9 +28,14 @@ uv sync                                   # install
 uv run pytest                             # all tests
 uv run ruff check . && uv run ruff format .
 uv run python -m mm.run --config config/base.yaml --start YYYY-MM-DD --end YYYY-MM-DD
+
+# data pipeline (dates UTC, --end exclusive, default = config study_period)
+uv run python -m mm.data.cli download --config config/base.yaml [--start D --end D]
+uv run python -m mm.data.cli clean    --config config/base.yaml [--start D --end D]
+uv run python -m mm.data.cli check    --config config/base.yaml
 ```
 
-Python 3.13 (newest Homebrew; see decisions D001). Core libraries: numpy, scipy, pandas, pyarrow, duckdb, httpx, pydantic (config), matplotlib, pytest, ruff.
+Python 3.12. Core libraries: numpy, scipy, pandas, pyarrow, duckdb, httpx, pydantic (config), matplotlib, pytest, ruff.
 
 ## Repo layout
 
@@ -107,18 +112,70 @@ Most bugs in this project will be silent unit errors. Follow these everywhere.
 - **P&L must reconcile.** Attribution components (spread capture, delta, gamma, theta, vega, hedging cost, fees, residual) must sum to total P&L; test this.
 - **Reproducibility.** Every reported number must come from `mm.run` with a committed config.
 
-## Phases (see the project plan for full detail)
+## Phases
 
-0. Setup: repo, env, tests, this file
-1. Data pipeline: downloaders, block-trade filter, instrument parser, cleaning
-2. Pricing: Black-76, Greeks, IV solver, forwards; reproduce Deribit marks
-3. Surface A: SVI on mark IVs, arbitrage checks, ATM / 25d RR / 25d fly time series
-4. Simulator: event-driven loop, fill model, fee model; hand-check 20 fills
-5. Quoting engine: spread, skew, inventory adjustment, size limits
-6. Hedging and risk: delta-hedge policies, vega/gamma limits, kill switch
-7. P&L attribution and markouts (1 min, 5 min, 1 h)
-8. Experiments: baseline vs variants, latency sweep, calm vs stress, time split
-9. Surface B: trade-IV surface, compare with A, rerun best quoter
-10. Write-up: research note and README
+Work through these in order. A phase is finished only when every "done when" check passes. Don't start the next phase until then.
 
-Each phase has "done when" checks in the plan. Don't move on until they pass.
+### Phase 0: Setup (half a day)
+- Repo, `uv` environment, ruff, pytest, this file, `config/base.yaml` with placeholder parameters, `reports/decisions.md`.
+- **Done when:** `uv run pytest` passes and `python -m mm.run` executes a hello-world.
+
+### Phase 1: Data pipeline (2–3 days)
+- Downloaders for historical ETH option trades, perpetual trades and prices, futures prices, and DVOL, with paging, retries and rate-limit handling. Cache all raw downloads.
+- Remove block trades.
+- Instrument parser: `ETH-27DEC26-4000-C` → underlying, expiry, strike, type.
+- Cleaning: UTC timestamps, drop obvious bad prints, time to expiry in years.
+- **Done when:** any day's trades load in one line, and a plot of daily trade counts and DVOL shows no gaps that can't be explained.
+
+### Phase 2: Pricing (2 days)
+- Black-76 on the forward, Greeks (delta, gamma, vega, theta), IV solver.
+- Forward per expiry from the matching future, or put-call parity where none exists.
+- Coin-margined pricing and premium-adjusted delta.
+- **Done when:** put-call parity and IV round-trip tests pass, and the model reproduces the mark prices attached to historical trades to within a few basis points of vol.
+
+### Phase 3: Surface A, fitted to Deribit marks (2 days)
+- Convert mark prices into mark IVs.
+- At each refit time, fit SVI per expiry to mark IVs from a trailing window (e.g. 30–60 min), vega-weighted.
+- Butterfly and calendar arbitrage checks; interpolate across expiries in total variance.
+- Time series of ATM vol, 25-delta risk reversal, 25-delta butterfly.
+- **Done when:** fit error against marks is small, no arbitrage is flagged on normal days, and ATM vol tracks DVOL.
+
+### Phase 4: Simulator and fill model (3–4 days)
+- Event-driven loop over historical trades: at each trade, re-price quotes from the latest surface and the latency-shifted underlying price, then apply the fill model. Surface refits, hedging and risk checks run on their own schedules.
+- Fee model from Deribit's schedule.
+- Start with a fixed-spread quoter.
+- **Done when:** the fixed-spread quoter runs end to end on one week of data, every fill is logged with its reason, and a hand-checked sample of 20 fills is correct.
+
+### Phase 5: Quoting engine (2 days)
+- Fair vol from the surface, bid/ask = fair ± spread (vol points).
+- Spread widens for short expiry, wing strikes and high realised vol.
+- Inventory skew: shift both quotes against current vega and delta.
+- Size and per-strike position limits.
+- **Done when:** each parameter has a test showing it moves quotes in the right direction.
+
+### Phase 6: Hedging and risk (2–3 days)
+- Delta-hedge with the perpetual. Policies to compare: fixed interval, delta band, gamma-scaled band.
+- Greeks aggregated by expiry and in total; vega and gamma limits stop quoting on the side that would increase risk.
+- Kill switch on sudden moves (large 1-minute return or DVOL jump).
+- **Done when:** net delta stays inside its band through a stress period, and limit breaches visibly cut quoting.
+
+### Phase 7: P&L attribution (2 days)
+- Split P&L into spread capture (edge vs fair at fill), delta, gamma, theta, vega, hedging cost, fees, residual.
+- Markouts: change in fair value 1 min, 5 min and 1 h after each fill.
+- **Done when:** components sum to total P&L with a small residual, and the worst day can be explained from the breakdown.
+
+### Phase 8: Experiments (3–4 days)
+- Baseline: fixed spread, no inventory skew, hourly hedging.
+- Sweeps: spread width, inventory-skew strength, hedge policy, vol-dependent widening, latency (0 ms, 100 ms, 1 s, 5 s).
+- Tune on the first part of the period, report on the later part; calm and stress periods separately.
+- **Done when:** there is a results table (P&L, Sharpe, max drawdown, fill count, average markout per variant) and a clear sentence on what worked and why.
+
+### Phase 9: Surface B, fitted to trade IVs (2–3 days)
+- Same SVI code on actual trade IVs, with smoothing and minimum-data rules for sparse wings and long expiries.
+- Compare with Surface A: where and how much they differ (wings, short expiries, stress periods).
+- Rerun the best Phase 8 quoter on Surface B; compare P&L, fill count and markouts.
+- **Done when:** one sentence can say whether quoting off our own surface helped or hurt, and why.
+
+### Phase 10: Write-up (2 days)
+- 3–5 page research note plus README: question, setup and simplifications, results table, 2–3 charts (P&L attribution over time, markouts by expiry and moneyness, worst stress period), next steps.
+- **Done when:** every number in the note can be reproduced from one `mm.run` command.
