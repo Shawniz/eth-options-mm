@@ -1,13 +1,27 @@
 # Base configuration. Every tunable parameter lives here, never in code.
 # Sections are added phase by phase; values marked TODO are placeholders until their phase.
 
+study_period:
+  start: 2025-01-01   # inclusive, UTC
+  end: 2025-07-01     # exclusive, UTC (so the last day is 2025-06-30)
+
 data:
   raw_dir: data/raw
   clean_dir: data/clean
   currency: ETH
-  history_base_url: https://history.deribit.com/api/v2
-  main_base_url: https://www.deribit.com/api/v2
-  exclude_block_trades: true
+  history_base_url: https://history.deribit.com/api/v2   # trades, instruments
+  main_base_url: https://www.deribit.com/api/v2          # DVOL (not on history server)
+  page_size: 1000          # max trades per request (API maximum)
+  dvol_resolution_s: 3600  # 1-minute DVOL is not available historically
+  exclude_block_trades: true   # negotiated off-book, never hit a quote
+  exclude_combo_trades: true   # legs priced by allocation inside a combo, not single-leg hits
+  # Liquidation trades are kept: they execute against the order book.
+  http:
+    max_requests_per_s: 10
+    max_retries: 6
+    backoff_base_s: 0.5    # wait = base * 2**attempt
+    backoff_max_s: 30.0
+    timeout_s: 30.0
 
 sim:
   # Underlying price used for re-pricing is taken this long before each trade.
@@ -15,7 +29,7 @@ sim:
 
 fill:
   # Taker sell at p fills our bid only if bid > p; taker buy fills our ask only if ask < p.
-  # Exactly at p: fill this fraction of the eligible size.
+  # Exactly at p: fill this fraction of the eligible size (0.0 by decision D003).
   at_price_fill_fraction: 0.0
   # Fill size = min(trade size, our quote size) * max_fill_fraction.
   max_fill_fraction: 0.5
