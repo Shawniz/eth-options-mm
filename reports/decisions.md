@@ -17,4 +17,4 @@ Each entry: the choice, the alternative, and why.
 ## D003 — `at_price_fill_fraction` defaults to 0.0
 - **Choice:** Trades exactly at our quote price do not fill us in the base config.
 - **Alternative:** A partial fill, for example 0.25 to 0.5.
-- **Why:** Price-time priority. A quote strictly better than p would have been hit first, but at p we tie with resting orders whose queue position is unknown without order-book data. Small trades usually only fill the front of the queue, and the ties that do reach deep into the queue tend to be the most adverse. 0.0 is the pessimistic bound. It will be swept over 0, 0.25, 0.5 and 1.0 in Phase 8. *Confirmed by owner.*
+- **Why:** Price-time priority. A quote strictly better than p would have been hit first, but at p we tie with resting orders whose queue position is unknown without order-book data. Small trades usually only fill the front of the queue, and the ties that do reach deep into the queue tend to be the most adverse. We use 0.0 (the pessimistic bound) for all runs. The owner decided not to sweep it. It stays a config parameter so it can be changed later without code changes. *Confirmed by owner.*
