@@ -101,6 +101,29 @@ class Specs(_Strict):
     perp: PerpSpecs
 
 
+class ForwardsConfig(_Strict):
+    future_basis_max_age_s: float = Field(gt=0)
+    parity_pair_window_s: float = Field(gt=0)
+    parity_atm_band: float = Field(gt=0)
+    parity_n_pairs: int = Field(ge=1)
+    parity_min_pairs: int = Field(ge=1)
+    parity_max_age_s: float = Field(gt=0)
+    basis_bounds: tuple[float, float]
+
+    @model_validator(mode="after")
+    def _check(self) -> ForwardsConfig:
+        if self.parity_min_pairs > self.parity_n_pairs:
+            raise ValueError("parity_min_pairs must be <= parity_n_pairs")
+        lo, hi = self.basis_bounds
+        if not 0 < lo < 1 < hi:
+            raise ValueError("basis_bounds must satisfy 0 < lo < 1 < hi")
+        return self
+
+
+class PricingConfig(_Strict):
+    forwards: ForwardsConfig
+
+
 class SimConfig(_Strict):
     latency_ms: int = Field(ge=0)
 
@@ -119,6 +142,7 @@ class Config(_Strict):
     study_period: StudyPeriod
     data: DataConfig
     specs: Specs
+    pricing: PricingConfig
     sim: SimConfig
     fill: FillConfig
     surface: SurfaceConfig

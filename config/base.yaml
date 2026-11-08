@@ -52,6 +52,21 @@ specs:
     maker_fee_rate: 0.0          # H1 2025 schedule; today's API shows a later schedule
     taker_fee_rate: 0.0005
 
+pricing:
+  forwards:
+    # F(t) = basis(t) x index(t). Basis = F/index moves slowly (carry); index moves fast.
+    # Expiry with a dated future: basis from that future's mark/index (same trade).
+    future_basis_max_age_s: 3600     # older than this -> treat as missing
+    # Expiry without a future: put-call parity on marks, F = K / (1 - (c - p)).
+    parity_pair_window_s: 60         # call and put trade at most this far apart
+    parity_atm_band: 0.10            # only strikes with |ln(K/index)| <= this
+    parity_n_pairs: 10               # median of the last N pairs ...
+    parity_min_pairs: 3              # ... needing at least this many
+    parity_max_age_s: 1800           # newest pair older than this -> missing
+    basis_bounds: [0.8, 1.25]        # sanity: observations outside are discarded
+    # If an expiry has neither, interpolate ln(basis) linearly in T between neighbouring
+    # expiries (ln basis = 0 at T = 0); flagged as source = interp.
+
 sim:
   # Underlying price used for re-pricing is taken this long before each trade.
   latency_ms: 0          # Phase 8 experiment: 0, 1000, 5000
