@@ -103,3 +103,12 @@ Each entry: the choice, the alternative, why, and the parameter's category:
 - **Choice:** All daily `eth_usd` delivery prices are fetched in one snapshot, paged 100 at a time. `settle_ts` is the date at 08:00 UTC. `check` fails if any expired, traded option expiry has no delivery price.
 - **Alternative:** Use the index price at 08:00.
 - **Why:** Deribit settles options at its official delivery price (an average of the index before expiry), not at a single index print.
+
+## D016 — Deribit fixture: tolerances and what they mean
+- **Category:** from data
+- **Choice:** A one-off snapshot of 151 live ETH tickers across all 12 expiries (9 hours to 319 days), committed as `tests/fixtures/deribit_tickers_2026-11-08.json`. It was made by `scripts/make_deribit_fixture.py` and approved by the owner.
+  - Price passes if `|ours − mark| ≤ 1e-4 + |Δ − p| × 6 bp`, where Δ − p = ∂p_eth/∂ln F, and the median forward gap is ≤ 1 bp.
+  - Greeks: delta within 5e-5, gamma within 1e-5, vega within 0.1%, theta within 0.1% (T ≥ 7 days only).
+- **Alternatives:** A flat price tolerance, which fails deep ITM long-dated options for reasons unrelated to the formula. Or solving each option's implied forward, which is noise-dominated because marks are rounded to 1e-4.
+- **Why:** With Deribit's own displayed forward and mark_iv, 90% of marks match to rounding plus 0.7 bp of forward; the worst case is 5.2 bp (26MAR27, where calls and puts agree on the offset). The residual is timing between each ticker's displayed `underlying_price` and the forward behind its mark, not a formula error. The Greeks match Deribit's display rounding.
+- **Finding:** for expiries under 7 days, Deribit's displayed theta follows a different convention (a factor of 1.1–10 from the analytic value). Ours is the analytic derivative, checked against finite differences. The project never uses the theta Greek for P&L (attribution uses full revaluation), so this has no effect.
