@@ -41,8 +41,8 @@ specs:
     maker_fee_eth_per_contract: 0.0003   # 0.03% of underlying
     taker_fee_eth_per_contract: 0.0003
     fee_cap_fraction_of_premium: 0.125   # fee <= 12.5% of option price
-    delivery_fee_eth_per_contract: 0.00015   # UNVERIFIED (D012)
-    delivery_fee_cap_fraction: 0.125         # UNVERIFIED (D012)
+    delivery_fee_eth_per_contract: 0.00015   # 0.015% of underlying (owner-confirmed, D012)
+    delivery_fee_cap_fraction: 0.125         # <= 12.5% of option value (owner-confirmed)
     delivery_fee_exempt_daily: true          # UNVERIFIED (D012)
   perp:
     instrument: ETH-PERPETUAL

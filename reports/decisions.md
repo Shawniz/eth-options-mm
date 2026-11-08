@@ -75,11 +75,11 @@ Each entry: the choice, the alternative, why, and the parameter's category:
 - **Alternative:** Read fees from today's API.
 - **Why:** Fees change over time. Today's perp record shows maker 1.5 bp and taker 3.5 bp, a schedule from August 2026, but in H1 2025 the perp was 0 / 5 bp. Option fees and ticks are identical on all 12,508 options expiring in the study period. The dated futures alive in the period carry taker 0.05%, which confirms the perp's H1 2025 taker fee. The 12.5% cap comes from secondary sources (the official fee page was blocked). The instrument data confirms the 0.0003 rate.
 
-## D012 — Option delivery fee: in config, NOT VERIFIED
-- **Category:** from data (unverified)
-- **Choice:** 0.00015 ETH per contract (0.015% of the underlying), capped at 12.5% of the option value, with daily options exempt.
-- **Alternative:** Zero until verified.
-- **Why:** The owner's choice. It only matters from Phase 4 (settlement), for positions held to expiry. **To confirm on the Deribit fee page while logged in.**
+## D012 — Option delivery fee
+- **Category:** from data
+- **Choice:** 0.00015 ETH per contract (0.015% of the underlying), capped at 12.5% of the option value. Daily options are treated as exempt.
+- **Alternative:** Zero.
+- **Why:** The owner confirmed the rate and cap on 2026-11-08. **The daily-option exemption is still unverified**; it's a config flag (`delivery_fee_exempt_daily`), so it can be switched off if wrong. It only matters from Phase 4, for positions held to expiry.
 
 ## D013 — Bad prints: drop invalid, flag suspect
 - **Category:** free choice (thresholds); from theory (the invalid rules)
