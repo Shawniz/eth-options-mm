@@ -36,6 +36,12 @@ class HttpConfig(_Strict):
     timeout_s: float = Field(gt=0)
 
 
+class SuspectConfig(_Strict):
+    iv_max: float = Field(gt=0)
+    mark_rel_dev: float = Field(gt=0)
+    mark_min_ticks: float = Field(ge=0)
+
+
 class DataConfig(_Strict):
     raw_dir: Path
     clean_dir: Path
@@ -47,6 +53,52 @@ class DataConfig(_Strict):
     exclude_block_trades: bool = True
     exclude_combo_trades: bool = True
     http: HttpConfig
+    suspect: SuspectConfig
+
+
+class TickStep(_Strict):
+    above_price_eth: float = Field(ge=0)
+    tick_eth: float = Field(gt=0)
+
+
+class OptionSpecs(_Strict):
+    contract_size_eth: float = Field(gt=0)
+    min_order_contracts: float = Field(gt=0)
+    tick_steps: list[TickStep] = Field(min_length=1)
+    maker_fee_eth_per_contract: float = Field(ge=0)
+    taker_fee_eth_per_contract: float = Field(ge=0)
+    fee_cap_fraction_of_premium: float = Field(gt=0, le=1)
+    delivery_fee_eth_per_contract: float = Field(ge=0)
+    delivery_fee_cap_fraction: float = Field(gt=0, le=1)
+    delivery_fee_exempt_daily: bool
+
+    @model_validator(mode="after")
+    def _steps_sorted(self) -> OptionSpecs:
+        levels = [s.above_price_eth for s in self.tick_steps]
+        if levels[0] != 0.0 or levels != sorted(set(levels)):
+            raise ValueError("tick_steps must start at 0 and be strictly increasing")
+        return self
+
+    def tick_for(self, price_eth: float) -> float:
+        tick = self.tick_steps[0].tick_eth
+        for s in self.tick_steps:
+            if price_eth > s.above_price_eth:
+                tick = s.tick_eth
+        return tick
+
+
+class PerpSpecs(_Strict):
+    instrument: str
+    contract_size_usd: float = Field(gt=0)
+    min_order_usd: float = Field(gt=0)
+    tick_usd: float = Field(gt=0)
+    maker_fee_rate: float
+    taker_fee_rate: float = Field(ge=0)
+
+
+class Specs(_Strict):
+    option: OptionSpecs
+    perp: PerpSpecs
 
 
 class SimConfig(_Strict):
@@ -66,6 +118,7 @@ class SurfaceConfig(_Strict):
 class Config(_Strict):
     study_period: StudyPeriod
     data: DataConfig
+    specs: Specs
     sim: SimConfig
     fill: FillConfig
     surface: SurfaceConfig

@@ -16,6 +16,12 @@ data:
   exclude_block_trades: true   # negotiated off-book, never hit a quote
   exclude_combo_trades: true   # legs priced by allocation inside a combo, not single-leg hits
   # Liquidation trades are kept: they execute against the order book.
+  # Bad prints (decision D013): rows that cannot be real are dropped; suspect rows are kept
+  # with a flag (is_suspect, suspect_reason) so later phases choose what to use.
+  suspect:
+    iv_max: 3.0              # trade iv above 300% is suspect (iv <= 0 is always suspect)
+    mark_rel_dev: 0.5        # |price - mark| / mark above this ...
+    mark_min_ticks: 5        # ... and more than this many minimum ticks away -> suspect
   http:
     max_requests_per_s: 10
     max_retries: 6
@@ -23,9 +29,32 @@ data:
     backoff_max_s: 30.0
     timeout_s: 30.0
 
+# Contract specs and fees for the study period (decisions D011, D012).
+# `mm.data.cli check` fails if these disagree with Deribit's instrument records.
+specs:
+  option:
+    contract_size_eth: 1.0
+    min_order_contracts: 1.0     # also the order increment
+    tick_steps:                  # tick size by premium level (ETH)
+      - {above_price_eth: 0.0, tick_eth: 0.0001}
+      - {above_price_eth: 0.005, tick_eth: 0.0005}
+    maker_fee_eth_per_contract: 0.0003   # 0.03% of underlying
+    taker_fee_eth_per_contract: 0.0003
+    fee_cap_fraction_of_premium: 0.125   # fee <= 12.5% of option price
+    delivery_fee_eth_per_contract: 0.00015   # UNVERIFIED (D012)
+    delivery_fee_cap_fraction: 0.125         # UNVERIFIED (D012)
+    delivery_fee_exempt_daily: true          # UNVERIFIED (D012)
+  perp:
+    instrument: ETH-PERPETUAL
+    contract_size_usd: 1.0       # inverse (reversed) contract, USD notional
+    min_order_usd: 1.0
+    tick_usd: 0.05
+    maker_fee_rate: 0.0          # H1 2025 schedule; today's API shows a later schedule
+    taker_fee_rate: 0.0005
+
 sim:
   # Underlying price used for re-pricing is taken this long before each trade.
-  latency_ms: 0          # sweep: 0, 100, 1000, 5000 (Phase 8)
+  latency_ms: 0          # Phase 8 experiment: 0, 1000, 5000
 
 fill:
   # Taker sell at p fills our bid only if bid > p; taker buy fills our ask only if ask < p.
