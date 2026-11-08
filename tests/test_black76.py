@@ -48,7 +48,10 @@ def test_greeks_match_finite_differences(is_call):
     assert delta(F, K, T, SIG, is_call) == pytest.approx((up - dn) / (2 * h), rel=1e-6)
     assert gamma(F, K, T, SIG) == pytest.approx((up - 2 * mid + dn) / h**2, rel=1e-4)
     # vega per 1 vol point (0.01), in USD
-    v_fd = price_usd(F, K, T, SIG + 0.005, is_call) - price_usd(F, K, T, SIG - 0.005, is_call)
+    hv = 0.0005  # small bump: a 1-point bump has visible O(h^2) curvature error
+    v_fd = (price_usd(F, K, T, SIG + hv, is_call) - price_usd(F, K, T, SIG - hv, is_call)) * (
+        0.01 / (2 * hv)
+    )
     assert vega(F, K, T, SIG) == pytest.approx(v_fd, rel=1e-6)
     # theta per calendar day, in USD (value change as one day passes)
     d = 1 / 365

@@ -40,3 +40,6 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "NPY", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["mm"]

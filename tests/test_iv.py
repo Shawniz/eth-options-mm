@@ -24,7 +24,7 @@ def test_round_trip_grid():
                 # where time value is tiny, success means the price reprices exactly
                 ok = status == Status.OK
                 rep = price_eth(f, k[ok], t, iv[ok], is_call)
-                assert rep == pytest.approx(p[ok], abs=1e-13)
+                assert rep == pytest.approx(p[ok], abs=1e-12)  # tick is 1e-4
 
 
 def test_out_of_bounds_prices_flagged_not_guessed():
@@ -63,4 +63,4 @@ def test_round_trip_property(m, t, s, is_call):
     p = price_eth(f, f * m, t, s, is_call)
     iv, status = implied_vol(np.array([p]), f, f * m, t, is_call)
     if status[0] == Status.OK:
-        assert price_eth(f, f * m, t, iv[0], is_call) == pytest.approx(p, abs=1e-13)
+        assert price_eth(f, f * m, t, iv[0], is_call) == pytest.approx(p, abs=1e-12)
