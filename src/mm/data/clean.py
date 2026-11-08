@@ -10,7 +10,11 @@ Conventions applied here (see CLAUDE.md "Units and conventions"):
 
 Filters, applied in order; each dropped row is counted under the first filter it fails,
 so raw_rows == kept + sum(dropped) always holds:
-    duplicate (trade_id), block (block_trade_id), combo (combo_id), bad_instrument.
+    duplicate (trade_id), block (block_trade_id), combo (combo_id), bad_instrument,
+    invalid (cannot be a real print: price <= 0, size <= 0, missing mark/index,
+             or an option traded at/after its expiry).
+Suspect option prints are KEPT and flagged (is_suspect, suspect_reason; decision D013):
+    iv_nonpositive, iv_high (> data.suspect.iv_max), far_from_mark.
 """
 
 from __future__ import annotations
@@ -24,11 +28,12 @@ import pandas as pd
 
 from mm.config import Config
 from mm.data.download import raw_path
-from mm.data.instruments import parse_instrument
+from mm.data.instruments import EXPIRY_HOUR_UTC, parse_instrument
+from mm.pricing.time import year_frac
 
 log = logging.getLogger(__name__)
 
-CLEAN_SOURCES = ("option_trades", "future_trades", "dvol")
+CLEAN_SOURCES = ("option_trades", "future_trades", "dvol", "funding")
 
 
 def clean_path(clean_dir: Path, dataset: str, day: date) -> Path:
@@ -84,7 +89,31 @@ def _filter_trades(raw: pd.DataFrame, cfg: Config, expect_kinds: set[str]):
     dropped["bad_instrument"] = int(bad.sum())
     if bad.any():
         log.warning("unparseable instruments: %s", sorted(df.loc[bad, "instrument_name"].unique()))
-    return df[~bad].copy(), p[~bad], dropped
+    df, p = df[~bad], p[~bad]
+    invalid = (
+        ~(df["price"] > 0)
+        | ~(df["amount"] > 0)
+        | df["index_price"].isna()
+        | df["mark_price"].isna()
+    )
+    if "option" in expect_kinds:
+        exp_ms = p["expiry"].map(lambda d: int(d.timestamp() * 1000))
+        invalid |= df["timestamp"] >= exp_ms
+    dropped["invalid"] = int(invalid.sum())
+    return df[~invalid].copy(), p[~invalid], dropped
+
+
+def _suspect(out: pd.DataFrame, cfg: Config) -> pd.Series:
+    """Reason a kept option print is suspect, or None. First matching reason wins."""
+    sc, spec = cfg.data.suspect, cfg.specs.option
+    tick = out["mark_price_eth"].map(spec.tick_for)
+    dev = (out["price_eth"] - out["mark_price_eth"]).abs()
+    far = (dev > sc.mark_rel_dev * out["mark_price_eth"]) & (dev > sc.mark_min_ticks * tick)
+    reason = pd.Series(pd.NA, index=out.index, dtype="string")
+    reason[far] = "far_from_mark"
+    reason[out["iv"] > sc.iv_max] = "iv_high"
+    reason[~(out["iv"] > 0)] = "iv_nonpositive"
+    return reason
 
 
 def _base_cols(df: pd.DataFrame) -> pd.DataFrame:
@@ -111,6 +140,9 @@ def _clean_options(raw: pd.DataFrame, cfg: Config) -> tuple[dict[str, pd.DataFra
     out["index_price_usd"] = df["index_price"].astype("float64")
     out["amount_contracts"] = df["amount"].astype("float64")
     out["is_liquidation"] = df["liquidation"].notna()
+    out["t_years"] = year_frac(out["ts"], out["expiry"])
+    out["suspect_reason"] = _suspect(out, cfg)
+    out["is_suspect"] = out["suspect_reason"].notna()
     return {"option_trades": out}, dropped
 
 
@@ -139,7 +171,23 @@ def _clean_dvol(raw: pd.DataFrame, cfg: Config) -> tuple[dict[str, pd.DataFrame]
     return {"dvol": out}, {}
 
 
-_CLEANERS = {"option_trades": _clean_options, "future_trades": _clean_futures, "dvol": _clean_dvol}
+def _clean_funding(raw: pd.DataFrame, cfg: Config) -> tuple[dict[str, pd.DataFrame], dict]:
+    out = pd.DataFrame({"ts": _ts(raw["timestamp"])})
+    # Each record covers the hour ENDING at ts, so it is known from ts onwards.
+    out["available_at"] = out["ts"]
+    out["interest_1h"] = raw["interest_1h"].astype("float64")  # fraction, not percent
+    out["interest_8h"] = raw["interest_8h"].astype("float64")
+    out["index_price_usd"] = raw["index_price"].astype("float64")
+    out["prev_index_price_usd"] = raw["prev_index_price"].astype("float64")
+    return {"funding": out}, {}
+
+
+_CLEANERS = {
+    "option_trades": _clean_options,
+    "future_trades": _clean_futures,
+    "dvol": _clean_dvol,
+    "funding": _clean_funding,
+}
 
 
 def clean_day(source: str, day: date, cfg: Config) -> dict:
@@ -161,6 +209,9 @@ def clean_day(source: str, day: date, cfg: Config) -> dict:
     }
     if len(outputs) > 1:
         report["kept_by_output"] = kept_by_output
+    if source == "option_trades":
+        reasons = outputs["option_trades"]["suspect_reason"].value_counts()
+        report["suspect"] = {k: int(v) for k, v in reasons.items()}
     if report["raw_rows"] != kept + sum(dropped.values()):
         raise AssertionError(f"row counts do not reconcile: {report}")
     rp = Path(cfg.data.clean_dir) / "_reports" / source / f"{day.isoformat()}.json"
@@ -214,6 +265,12 @@ def clean_instruments(cfg: Config) -> dict[str, pd.DataFrame]:
                 "maker_commission": g["maker_commission"].astype("float64"),
                 "taker_commission": g["taker_commission"].astype("float64"),
                 "settlement_period": g["settlement_period"],
+                "min_trade_amount": g["raw_json"]
+                .map(lambda j: json.loads(j).get("min_trade_amount"))
+                .astype("float64"),
+                "tick_size_steps": g["raw_json"].map(
+                    lambda j: json.dumps(json.loads(j).get("tick_size_steps") or [], sort_keys=True)
+                ),
             }
         )
         if kind == "option":
@@ -253,3 +310,102 @@ def check_trades_against_instruments(cfg: Config) -> list[str]:
             )
             missing |= {r[0] for r in con.execute(q).fetchall()}
     return sorted(missing)
+
+
+# ---------- delivery prices ----------
+
+
+def clean_delivery_prices(cfg: Config) -> pd.DataFrame:
+    """Latest snapshot -> clean/delivery_prices.parquet (date, settle_ts, delivery_price_usd).
+    settle_ts is the 08:00 UTC expiry time the price settles."""
+    files = sorted((Path(cfg.data.raw_dir) / "delivery_prices").glob("fetched=*/*.parquet"))
+    if not files:
+        raise FileNotFoundError(
+            "no delivery price snapshot; run download --sources delivery_prices"
+        )
+    raw = pd.read_parquet(files[-1])
+    d = pd.to_datetime(raw["date"], utc=True)
+    df = pd.DataFrame(
+        {
+            "date": raw["date"],
+            "settle_ts": (d + pd.Timedelta(hours=EXPIRY_HOUR_UTC)).astype("datetime64[ms, UTC]"),
+            "delivery_price_usd": raw["delivery_price"].astype("float64"),
+        }
+    ).sort_values("date", ignore_index=True)
+    _write(df, Path(cfg.data.clean_dir) / "delivery_prices.parquet")
+    return df
+
+
+def check_delivery_coverage(cfg: Config) -> list[str]:
+    """Expiry dates of traded options (already expired) with no official delivery price."""
+    from mm.data.db import connect
+
+    con = connect(cfg.data.clean_dir)
+    q = """
+        select distinct strftime(expiry, '%Y-%m-%d') d from option_trades
+        where expiry < now()
+        and strftime(expiry, '%Y-%m-%d') not in (select date from delivery_prices)
+        order by d
+    """
+    return [r[0] for r in con.execute(q).fetchall()]
+
+
+# ---------- specs in config vs Deribit records ----------
+
+
+def check_specs(cfg: Config) -> list[str]:
+    """Compare config `specs` with Deribit's records for instruments alive during the
+    study period. Returns a list of problems (empty = consistent)."""
+    from mm.data.db import connect
+
+    con = connect(cfg.data.clean_dir)
+    start, end = str(cfg.study_period.start), str(cfg.study_period.end)
+    alive = f"created < '{end}' and (expiry is null or expiry > '{start}')"
+    o, p = cfg.specs.option, cfg.specs.perp
+    steps = json.dumps(
+        [{"above_price": s.above_price_eth, "tick_size": s.tick_eth} for s in o.tick_steps[1:]],
+        sort_keys=True,
+    )
+    problems = []
+    checks = [
+        ("option", "contract_size", o.contract_size_eth),
+        ("option", "min_trade_amount", o.min_order_contracts),
+        ("option", "tick_size", o.tick_steps[0].tick_eth),
+        ("option", "maker_commission", o.maker_fee_eth_per_contract),
+        ("option", "taker_commission", o.taker_fee_eth_per_contract),
+    ]
+    views = {r[0] for r in con.execute("select view_name from duckdb_views()").fetchall()}
+    for kind, col, want in checks:
+        if f"instruments_{kind}" not in views:
+            continue
+        q = f"select {col}, count(*) from instruments_{kind} where {alive} group by 1"
+        for val, n in con.execute(q).fetchall():
+            if val is None or abs(val - want) > 1e-12:
+                label = col.replace("_commission", " fee")
+                problems.append(f"{kind} {label}: config {want}, Deribit {val} on {n} instruments")
+    if "instruments_option" in views:
+        q = f"select tick_size_steps, count(*) from instruments_option where {alive} group by 1"
+        for val, n in con.execute(q).fetchall():
+            if val != steps:
+                problems.append(f"option tick steps: config {steps}, Deribit {val} on {n}")
+    if "instruments_future" in views:
+        row = con.execute(
+            "select contract_size, min_trade_amount, tick_size from instruments_future "
+            f"where instrument_name = '{p.instrument}'"
+        ).fetchone()
+        if row is None:
+            problems.append(f"{p.instrument} not in instrument list")
+        elif row != (want := (p.contract_size_usd, p.min_order_usd, p.tick_usd)):
+            problems.append(f"perp specs: config {want}, Deribit {row}")
+        # The perp record shows today's fees; dated futures alive in the study period carry
+        # the study-period taker fee, which the perp shared.
+        q = (
+            "select taker_commission, count(*) from instruments_future "
+            f"where kind = 'future' and {alive} group by 1"
+        )
+        for val, n in con.execute(q).fetchall():
+            if abs(val - p.taker_fee_rate) > 1e-12:
+                problems.append(
+                    f"future taker fee: config perp {p.taker_fee_rate}, Deribit {val} on {n}"
+                )
+    return problems
