@@ -11,4 +11,5 @@ Ideas that are outside the current scope. They go here, not into the code. Each 
 - **Signal:** Aave liquidation pressure as an input to skew and spread.
 
 ## Raised during the build
-- *(none yet)*
+- **Exchange pauses (Phase 1):** a simulator "pause" mode that drops quotes and forces a surface refit after an exchange-wide pause. H1 2025 had 7 maintenance-like pauses at 09:00 UTC and 1 incident. Build it in Phase 4 if cheap; otherwise state it as a simplification.
+- **Delivery fee (Phase 1):** confirm the option delivery fee on Deribit's fee page (D012).

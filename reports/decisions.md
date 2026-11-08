@@ -65,3 +65,41 @@ Each entry: the choice, the alternative, why, and the parameter's category:
 - **Choice:** A single `kind=future` download, which includes ETH-PERPETUAL, split into `perp_trades` and `future_trades` during cleaning. Sizes are stored as `amount_usd`, because these are reversed contracts with USD notional.
 - **Alternative:** A separate per-instrument download for the perp.
 - **Why:** It's one paging loop and the result is identical. Note that there are no daily futures: forwards for daily option expiries will need interpolation (Phase 2).
+
+## D011 — Contract specs and fees from the study period, checked against Deribit
+- **Category:** from data
+- **Choice:** `config/base.yaml → specs`.
+  - Options: 1 ETH contract, minimum (and increment) 1 contract, tick 0.0001 ETH up to a price of 0.005 and 0.0005 above. The maker and taker fee is 0.0003 ETH per contract (0.03% of the underlying), capped at 12.5% of the option price.
+  - Perp: an inverse contract with a $1 contract size, minimum $1, tick $0.05. Fees are maker 0 and taker 0.05%.
+  - `mm.data.cli check` fails if the config disagrees with Deribit's records for any instrument alive during the study period.
+- **Alternative:** Read fees from today's API.
+- **Why:** Fees change over time. Today's perp record shows maker 1.5 bp and taker 3.5 bp, a schedule from August 2026, but in H1 2025 the perp was 0 / 5 bp. Option fees and ticks are identical on all 12,508 options expiring in the study period. The dated futures alive in the period carry taker 0.05%, which confirms the perp's H1 2025 taker fee. The 12.5% cap comes from secondary sources (the official fee page was blocked). The instrument data confirms the 0.0003 rate.
+
+## D012 — Option delivery fee: in config, NOT VERIFIED
+- **Category:** from data (unverified)
+- **Choice:** 0.00015 ETH per contract (0.015% of the underlying), capped at 12.5% of the option value, with daily options exempt.
+- **Alternative:** Zero until verified.
+- **Why:** The owner's choice. It only matters from Phase 4 (settlement), for positions held to expiry. **To confirm on the Deribit fee page while logged in.**
+
+## D013 — Bad prints: drop invalid, flag suspect
+- **Category:** free choice (thresholds); from theory (the invalid rules)
+- **Choice:**
+  - **Drop** rows that cannot be real: price ≤ 0, size ≤ 0, missing mark or index, or an option traded at or after expiry. They are counted as `invalid`.
+  - **Keep and flag** suspect option prints (`is_suspect`, `suspect_reason`):
+    - `iv_nonpositive`: trade iv ≤ 0
+    - `iv_high`: trade iv > `data.suspect.iv_max` (3.0)
+    - `far_from_mark`: |price − mark| > 50% of mark **and** more than 5 minimum ticks away
+- **Alternative:** Drop suspect prints in cleaning.
+- **Why:** Suspect prints are often real: deep in-the-money options, or options at the minimum tick near expiry, where the IV is meaningless but a quote could still be hit. Phase 2/3 decide what feeds the surface; the fill model still sees them. The owner chose this.
+
+## D014 — Funding: hourly records, start bound exclusive
+- **Category:** from data (API behaviour, verified)
+- **Choice:** `get_funding_rate_history` is downloaded one UTC day per request, starting from `start − 1 ms`. Each record (`interest_1h`, `interest_8h`, both fractions) covers the hour **ending** at its timestamp, so `available_at = ts`.
+- **Alternative:** Request long ranges.
+- **Why:** The endpoint silently keeps only the latest 744 records of a longer range, and its `start_timestamp` is exclusive, unlike the trade endpoints. The first download missed the 00:00 record each day; those files were moved to `data/raw/_quarantine/`, not deleted. How funding accrues on the position (hourly vs continuous) is decided in Phase 4.
+
+## D015 — Delivery prices: one snapshot, settled at 08:00 UTC
+- **Category:** from data
+- **Choice:** All daily `eth_usd` delivery prices are fetched in one snapshot, paged 100 at a time. `settle_ts` is the date at 08:00 UTC. `check` fails if any expired, traded option expiry has no delivery price.
+- **Alternative:** Use the index price at 08:00.
+- **Why:** Deribit settles options at its official delivery price (an average of the index before expiry), not at a single index print.

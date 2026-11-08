@@ -34,27 +34,27 @@ def daily_stats(cfg: Config) -> pd.DataFrame:
         select unnest(range(date '{s}', date '{e}', interval 1 day))::date as day
     ),
     opt as (
-        select date::date day, count(*) n_opt, sum(is_suspect::int) n_suspect,
+        select date::date as day, count(*) n_opt, sum(is_suspect::int) n_suspect,
                sum(amount_contracts) opt_contracts
         from option_trades group by 1
     ),
     opt_gap as (
-        select day, max(gap_s) max_gap_opt_s from (
-            select date::date day,
+        select day, max(gap_s) as max_gap_opt_s from (
+            select date::date as day,
                    epoch(ts - lag(ts) over (partition by date order by ts)) gap_s
             from option_trades) group by 1
     ),
-    perp as (select date::date day, count(*) n_perp from perp_trades group by 1),
+    perp as (select date::date as day, count(*) n_perp from perp_trades group by 1),
     perp_gap as (
-        select day, max(gap_s) max_gap_perp_s from (
-            select date::date day,
+        select day, max(gap_s) as max_gap_perp_s from (
+            select date::date as day,
                    epoch(ts - lag(ts) over (partition by date order by ts)) gap_s
             from perp_trades) group by 1
     ),
-    fut as (select date::date day, count(*) n_fut from future_trades group by 1),
-    dv as (select date::date day, count(*) n_dvol, last(dvol_close order by ts) dvol
+    fut as (select date::date as day, count(*) n_fut from future_trades group by 1),
+    dv as (select date::date as day, count(*) n_dvol, last(dvol_close order by ts) dvol
            from dvol group by 1),
-    fu as (select date::date day, count(*) n_funding, sum(interest_1h) funding_day
+    fu as (select date::date as day, count(*) n_funding, sum(interest_1h) funding_day
            from funding group by 1)
     select * from days
     left join opt using (day) left join opt_gap using (day)
@@ -74,6 +74,25 @@ def daily_stats(cfg: Config) -> pd.DataFrame:
     if rows:
         df = df.merge(pd.DataFrame(rows), on="day", how="left")
     return df.fillna({c: 0 for c in df.columns if c.startswith(("n_", "drop_"))})
+
+
+def exchange_pauses(cfg: Config, min_gap_s: float = 300.0) -> pd.DataFrame:
+    """Perp silences longer than min_gap_s, with the longest overlapping option gap.
+    The perp trades every few seconds, so a multi-minute perp gap is an exchange pause."""
+    con = connect(cfg.data.clean_dir)
+    q = f"""
+    with p as (select lag(ts) over (order by ts) as a, ts as b from perp_trades),
+    pauses as (select a, b from p where epoch(b - a) > {min_gap_s}),
+    o as (select lag(ts) over (order by ts) as a, ts as b from option_trades)
+    select strftime(pauses.a, '%Y-%m-%d %H:%M:%S') as perp_last,
+           strftime(pauses.b, '%Y-%m-%d %H:%M:%S') as perp_next,
+           strftime(pauses.a, '%a') as weekday,
+           round(epoch(pauses.b - pauses.a) / 60, 1) as perp_gap_min,
+           round(max(epoch(o.b - o.a)) / 60, 1) as option_gap_min
+    from pauses left join o on o.a < pauses.b and o.b > pauses.a
+    group by pauses.a, pauses.b order by pauses.a
+    """
+    return con.execute(q).df()
 
 
 def _style(ax, title: str) -> None:
@@ -144,7 +163,9 @@ def write_report(cfg: Config, out_md: Path, out_png: Path) -> pd.DataFrame:
     tot = {c: int(df[c].sum()) for c in df.columns if c.startswith("drop_") or c == "n_suspect"}
 
     def sel(x, cols):
-        return _md_table(x[cols].round(1)) if len(x) else "_none_"
+        return _md_table(x[cols].round(3)) if len(x) else "_none_"
+
+    pauses = exchange_pauses(cfg)
 
     md = f"""# Phase 1 data report
 
@@ -188,6 +209,12 @@ Options:
 Perpetual:
 
 {sel(gaps_perp, ["date", "weekday", "n_perp", "max_gap_perp_s"])}
+
+## Exchange-wide pauses (perp silent for more than 5 minutes)
+
+`option_gap_min` is the longest option-trade gap overlapping the pause.
+
+{_md_table(pauses) if len(pauses) else "_none_"}
 """
     out_md.parent.mkdir(parents=True, exist_ok=True)
     out_md.write_text(md)
