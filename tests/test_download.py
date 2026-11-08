@@ -148,7 +148,9 @@ def test_download_funding_one_day(cfg):
 
         def get(self, method, params):
             self.calls.append((method, dict(params)))
-            hours = range(params["start_timestamp"], params["end_timestamp"] + 1, 3_600_000)
+            # Real API (verified 2026-11-08): start is EXCLUSIVE, end inclusive.
+            lo = (params["start_timestamp"] // 3_600_000 + 1) * 3_600_000
+            hours = range(lo, params["end_timestamp"] + 1, 3_600_000)
             return [
                 {
                     "timestamp": h,
@@ -169,6 +171,7 @@ def test_download_funding_one_day(cfg):
     assert method == "public/get_funding_rate_history"
     assert params["instrument_name"] == cfg.specs.perp.instrument
     assert params["end_timestamp"] == E
+    assert params["start_timestamp"] == S - 1
 
 
 def test_download_funding_detects_truncation(cfg):

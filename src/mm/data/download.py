@@ -236,9 +236,11 @@ def fetch_funding(client: Client, instrument: str, start_ms: int, end_ms: int) -
     The API truncates long ranges to the most recent records without saying so, so a
     response that hits the cap is treated as an error rather than trusted.
     """
+    # Unlike the trade endpoints, start_timestamp is EXCLUSIVE here (end is inclusive),
+    # so ask from start_ms - 1 to get the record stamped exactly at start_ms.
     rows = client.get(
         "public/get_funding_rate_history",
-        {"instrument_name": instrument, "start_timestamp": start_ms, "end_timestamp": end_ms},
+        {"instrument_name": instrument, "start_timestamp": start_ms - 1, "end_timestamp": end_ms},
     )
     if len(rows) >= FUNDING_MAX_RECORDS:
         raise RuntimeError(f"funding response may be truncated ({len(rows)} records)")
