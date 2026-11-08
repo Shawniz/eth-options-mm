@@ -7,7 +7,10 @@ Sources:
     option_trades  history server, all ETH option trades (kind=option)
     future_trades  history server, all ETH futures incl. ETH-PERPETUAL (kind=future)
     dvol           main API, ETH DVOL candles (not available on the history server)
-Instrument specs are a separate snapshot: see download_instruments().
+    funding        main API, hourly ETH-PERPETUAL funding records
+Snapshots (whole history at fetch time, raw/<name>/fetched=YYYY-MM-DD/):
+    instruments      download_instruments()
+    delivery_prices  download_delivery_prices()
 """
 
 from __future__ import annotations
@@ -28,7 +31,10 @@ from mm.config import Config
 log = logging.getLogger(__name__)
 
 TRADE_SOURCES = {"option_trades": "option", "future_trades": "future"}
-SOURCES = (*TRADE_SOURCES, "dvol")
+SOURCES = (*TRADE_SOURCES, "dvol", "funding")
+SNAPSHOTS = ("instruments", "delivery_prices")
+# get_funding_rate_history silently keeps only the LAST 744 records of a longer range.
+FUNDING_MAX_RECORDS = 744
 DAY_MS = 86_400_000
 
 # Typed columns we know about. Anything else the API sends goes into extra_json, so
@@ -62,6 +68,18 @@ DVOL_SCHEMA = pa.schema(
         for c in ("timestamp", "open", "high", "low", "close")
     ]
 )
+
+FUNDING_SCHEMA = pa.schema(
+    [
+        ("timestamp", pa.int64()),
+        ("index_price", pa.float64()),
+        ("prev_index_price", pa.float64()),
+        ("interest_1h", pa.float64()),
+        ("interest_8h", pa.float64()),
+    ]
+)
+
+DELIVERY_SCHEMA = pa.schema([("date", pa.string()), ("delivery_price", pa.float64())])
 
 INSTRUMENT_SCHEMA = pa.schema(
     [
@@ -122,6 +140,14 @@ def trades_to_table(rows: list[dict]) -> pa.Table:
         extra = {k: v for k, v in r.items() if k not in known}
         cols["extra_json"].append(json.dumps(extra, sort_keys=True) if extra else None)
     return pa.table(cols, schema=TRADE_SCHEMA)
+
+
+def _rows_to_table(rows: list[dict], schema: pa.Schema) -> pa.Table:
+    return pa.table({n: [r.get(n) for r in rows] for n in schema.names}, schema=schema)
+
+
+def delivery_to_table(rows: list[dict]) -> pa.Table:
+    return _rows_to_table(rows, DELIVERY_SCHEMA)
 
 
 def instruments_to_table(rows: list[dict]) -> pa.Table:
@@ -204,6 +230,22 @@ def fetch_dvol(client: Client, currency: str, start_ms: int, end_ms: int, res_s:
     return [rows[k] for k in sorted(rows)]
 
 
+def fetch_funding(client: Client, instrument: str, start_ms: int, end_ms: int) -> list[dict]:
+    """Hourly funding records with start_ms <= timestamp <= end_ms (one day = 24 rows).
+
+    The API truncates long ranges to the most recent records without saying so, so a
+    response that hits the cap is treated as an error rather than trusted.
+    """
+    rows = client.get(
+        "public/get_funding_rate_history",
+        {"instrument_name": instrument, "start_timestamp": start_ms, "end_timestamp": end_ms},
+    )
+    if len(rows) >= FUNDING_MAX_RECORDS:
+        raise RuntimeError(f"funding response may be truncated ({len(rows)} records)")
+    rows = [r for r in rows if start_ms <= r["timestamp"] <= end_ms]
+    return sorted({r["timestamp"]: r for r in rows}.values(), key=lambda r: r["timestamp"])
+
+
 def _check_day_complete(day: date) -> None:
     _, end = day_bounds_ms(day)
     if end >= time.time() * 1000:
@@ -232,6 +274,9 @@ def download_day(
             cfg.data.page_size,
         )
         table = trades_to_table(rows)
+    elif source == "funding":
+        rows = fetch_funding(main, cfg.specs.perp.instrument, s, e)
+        table = _rows_to_table(rows, FUNDING_SCHEMA)
     else:
         rows = fetch_dvol(main, cfg.data.currency, s, e, cfg.data.dvol_resolution_s)
         table = pa.table(
@@ -264,6 +309,43 @@ def download_instruments(cfg: Config, history: Client, fetched: date | None = No
         out.append(write_raw(instruments_to_table(list(rows.values())), path))
         log.info("instruments %s: %d", kind, len(rows))
     return out
+
+
+def download_delivery_prices(
+    cfg: Config,
+    main: Client,
+    fetched: date | None = None,
+    index_name: str | None = None,
+    page_size: int = 100,
+) -> list[Path]:
+    """Snapshot of all official daily delivery (settlement) prices for the index.
+
+    Written to raw/delivery_prices/fetched=YYYY-MM-DD/<index>.parquet; same-day re-run is a no-op.
+    """
+    fetched = fetched or datetime.now(UTC).date()
+    index_name = index_name or f"{cfg.data.currency.lower()}_usd"
+    path = (
+        Path(cfg.data.raw_dir) / "delivery_prices" / f"fetched={fetched}" / f"{index_name}.parquet"
+    )
+    if path.exists():
+        return []
+    rows: dict[str, dict] = {}
+    offset, total = 0, None
+    while total is None or offset < total:
+        r = main.get(
+            "public/get_delivery_prices",
+            {"index_name": index_name, "offset": offset, "count": page_size},
+        )
+        total = r["records_total"]
+        if not r["data"]:
+            break
+        for x in r["data"]:
+            rows[x["date"]] = x
+        offset += page_size
+    if len(rows) != total:
+        raise RuntimeError(f"delivery prices: got {len(rows)} of {total} records")
+    log.info("delivery prices %s: %d", index_name, len(rows))
+    return [write_raw(delivery_to_table(sorted(rows.values(), key=lambda x: x["date"])), path)]
 
 
 def iter_days(start: date, end: date):

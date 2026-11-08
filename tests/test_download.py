@@ -139,3 +139,68 @@ def test_download_dvol_follows_continuation(cfg):
     assert d["timestamp"] == [S, S + 3_600_000, S + 7_200_000]
     assert main.calls[1]["end_timestamp"] == S + 3_600_000
     assert main.calls[0]["resolution"] == cfg.data.dvol_resolution_s
+
+
+def test_download_funding_one_day(cfg):
+    class FakeMain:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, method, params):
+            self.calls.append((method, dict(params)))
+            hours = range(params["start_timestamp"], params["end_timestamp"] + 1, 3_600_000)
+            return [
+                {
+                    "timestamp": h,
+                    "index_price": 3300.0,
+                    "prev_index_price": 3299.0,
+                    "interest_1h": 1e-6,
+                    "interest_8h": 8e-6,
+                }
+                for h in hours
+            ]
+
+    main = FakeMain()
+    p = download_day("funding", DAY, cfg, history=None, main=main)
+    d = pq.read_table(p).to_pydict()
+    assert len(d["timestamp"]) == 24
+    assert d["timestamp"][0] == S and d["timestamp"][-1] == S + 23 * 3_600_000
+    method, params = main.calls[0]
+    assert method == "public/get_funding_rate_history"
+    assert params["instrument_name"] == cfg.specs.perp.instrument
+    assert params["end_timestamp"] == E
+
+
+def test_download_funding_detects_truncation(cfg):
+    from mm.data.download import FUNDING_MAX_RECORDS, fetch_funding
+
+    class Truncating:
+        def get(self, method, params):
+            return [{"timestamp": S + i} for i in range(FUNDING_MAX_RECORDS)]
+
+    with pytest.raises(RuntimeError, match="truncat"):
+        fetch_funding(Truncating(), "ETH-PERPETUAL", S, E)
+
+
+def test_download_delivery_prices_pages_by_offset(cfg):
+    from mm.data.download import download_delivery_prices
+
+    allrows = [{"date": f"2025-01-{d:02d}", "delivery_price": 3000.0 + d} for d in range(31, 0, -1)]
+
+    class FakeMain:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, method, params):
+            self.calls.append(dict(params))
+            o, c = params["offset"], params["count"]
+            return {"data": allrows[o : o + c], "records_total": len(allrows)}
+
+    main = FakeMain()
+    paths = download_delivery_prices(cfg, main, fetched=date(2026, 11, 8), page_size=10)
+    d = pq.read_table(paths[0]).to_pydict()
+    assert len(d["date"]) == 31 and len(set(d["date"])) == 31
+    assert [c["offset"] for c in main.calls] == [0, 10, 20, 30]
+    assert main.calls[0]["index_name"] == "eth_usd"
+    # same-day re-run is a no-op
+    assert download_delivery_prices(cfg, main, fetched=date(2026, 11, 8), page_size=10) == []
