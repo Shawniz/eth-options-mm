@@ -168,7 +168,7 @@ Work in order. A phase is finished only when every "done when" check passes.
 
 ### Phase 2: Pricing (2 days)
 - Black-76 (undiscounted), ETH premium C/F, Greeks, IV solver, forwards per expiry.
-- **Done when:** put-call parity and IV round-trip tests pass, and the model reproduces the mark prices on historical trades to within a few basis points of vol.
+- **Done when:** put-call parity and IV round-trip tests pass, the Deribit ticker fixture passes, and on historical trades (inclusive timing, D018) our IV vs Deribit's trade IV has median ≤ 0.05 and p95 ≤ 0.25 vol points for expiries > 4 days, and ≥ 95% of all trades are reproduced within ½ tick of price (D019). `uv run python -m mm.pricing.validate --config config/base.yaml`.
 
 ### Phase 3: Surface A (2 days)
 - Mark prices → mark IVs. At each refit, fit SVI per expiry to mark IVs from a trailing window (30–60 min), pooling in log-moneyness k = ln(K/F) at each observation's own time, vega-weighted, warm-started from the previous fit, with minimum-data rules.

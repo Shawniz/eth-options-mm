@@ -135,3 +135,15 @@ Each entry: the choice, the alternative, why, and the parameter's category:
   - The index series is built from every trade stream (perp, futures, options), so the latest index before any t is as fresh as the data allows.
 - **Alternative:** Strict everywhere. That would make the Phase 2 test mostly measure index update speed, and it would add timing noise to every short-dated mark IV that feeds the surface.
 - **Why:** The Phase 2 check asks whether our pricer and forward method are right, so it should use the inputs Deribit had at the trade instant. The cost of not having them (the market moving just before a trade) is real adverse selection, and it's measured by the latency experiment and the markouts, not hidden in the pricer test. The owner agreed (2026-11-09). On 1–7 Jan 2025, inclusive gave median 0.017 / p95 0.237 vol points, and strict at 0 ms gave 0.030 / 0.369.
+
+## D019 — Phase 2 done-when: a vol target beyond 4 days, plus a price target on everything
+- **Category:** free choice (owner decision, 2026-11-09), backed by data
+- **Choice:** Both of these must pass, using the inclusive timing view (D018):
+  1. For expiries over 4 days, |our IV − Deribit's trade IV| has median ≤ 0.05 and p95 ≤ 0.25 vol points.
+  2. On all trades, ≥ 95% are reproduced within ½ tick of price.
+- **Alternatives:**
+  - The original single vol target on all trades, which failed at p95 0.362.
+  - First trying to tighten the interpolated forward, which at best roughly halves the 1–4 day tail and still misses.
+- **Why:** Our forward is within 0.33 bp (with a future) and 0.58 bp (interpolated) of the forward Deribit must have used. On 1–4 day options, half a basis point of forward (a fraction of a tick) is worth up to a full vol point. So a vol target there measures the option's sensitivity, not the pricer. Quotes sit on the tick grid, so price error is the error that matters.
+- **Result (H1 2025):** PASS. Beyond 4 days: median 0.013, p95 0.142. All trades: 97.2% within ½ tick.
+- **Consequence for Phase 5:** for 1–4 day options, small index moves change the IV by about 1 vol point at p95 even at 0 ms latency. Wider spreads or a near-expiry cut-off (`min_hours_to_expiry`) will be needed there.

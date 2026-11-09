@@ -5,7 +5,7 @@
 Reads the priced cache (mm.pricing.enrich) and writes reports/phase2_validation.md.
 Exit code 1 if the done-when check fails.
 
-Pass/fail (decision D018) uses the INCLUSIVE view: our forward at the trade instant
+Pass/fail (decisions D018, D019) uses the INCLUSIVE view: our forward at the trade instant
 (basis up to t, the trade's own index), i.e. the inputs Deribit itself had. The STRICT
 view (< t - latency) is reported as "information lag": what a resting quote could know.
 """
@@ -21,7 +21,7 @@ import pandas as pd
 from scipy.optimize import brentq
 
 from mm.config import Config, load_config
-from mm.pricing.black76 import delta, price_eth
+from mm.pricing.black76 import delta, price_eth, vega
 from mm.pricing.enrich import CACHE_NAME, build_curve
 from mm.pricing.iv import Status
 
@@ -89,6 +89,11 @@ def sample_universe(p: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         s["trade_iv_ours"].to_numpy(),
         call,
     )
+    # vol error -> price error in ETH (vega per vol point), and in Deribit ticks
+    f, k, t = s["forward_usd"].to_numpy(), s["strike_usd"].to_numpy(), s["t_years"].to_numpy()
+    s["price_err_eth"] = s["err_incl"] * np.asarray(vega(f, k, t, s["iv"].to_numpy())) / f
+    tick = s["price_eth"].map(cfg.specs.option.tick_for)
+    s["price_err_ticks"] = s["price_err_eth"] / tick
     s["T_days"] = pd.cut(s["t_years"] * 365, T_BUCKETS)
     s["abs_delta"] = pd.cut(np.abs(d), DELTA_BUCKETS)
     s["month"] = s["ts"].dt.strftime("%Y-%m")
@@ -161,8 +166,19 @@ def write_report(cfg: Config, out: Path) -> bool:
     p = load_priced(cfg)
     s = sample_universe(p, cfg)
     head = _summary(s["err_incl"])
-    passed = head["median"] <= v.target_median_volpts and head["p95"] <= v.target_p95_volpts
+    long_ = s[s["t_years"] * 365 > v.vol_target_min_days]
+    vol = _summary(long_["err_incl"])
+    vol_ok = vol["median"] <= v.target_median_volpts and vol["p95"] <= v.target_p95_volpts
+    within = float((s["price_err_ticks"] <= 0.5).mean())
+    px_ok = within >= v.price_target_frac_within_half_tick
+    passed = vol_ok and px_ok
     strict = _summary(s["err_strict"])
+    tick_tbl = (
+        s.groupby("T_days", observed=True)["price_err_ticks"]
+        .agg(n="size", p95=lambda x: np.percentile(x, 95), within_half=lambda x: (x <= 0.5).mean())
+        .reset_index()
+    )
+    tick_tbl["T_days"] = tick_tbl["T_days"].astype(str)
     status_counts = (
         p["mark_iv_status"]
         .map(lambda x: Status(int(x)).name)
@@ -178,7 +194,16 @@ def write_report(cfg: Config, out: Path) -> bool:
     def _row(label, x, tgt):
         return f"| {label} | {x['median']:.3f} | {x['p95']:.3f} | {x['p99']:.3f} | {tgt} |"
 
-    row_incl = _row("inclusive (inputs at the trade instant), **pass/fail**", head, target)
+    row_incl = _row("inclusive, all trades", head, target)
+    mark = {True: "✅", False: "❌"}
+    vol_row = (
+        f"| vol error, expiries > {v.vol_target_min_days:g} days ({vol['n']:,} trades) "
+        f"| median {vol['median']:.3f}, p95 {vol['p95']:.3f} | {target} | {mark[vol_ok]} |"
+    )
+    px_row = (
+        f"| price error, all trades | {within * 100:.1f}% within ½ tick "
+        f"| ≥ {v.price_target_frac_within_half_tick * 100:.0f}% | {mark[px_ok]} |"
+    )
     row_strict = _row(
         f"strict (< t − {cfg.sim.latency_ms} ms), information lag", strict, "reported only"
     )
@@ -195,10 +220,27 @@ more than {v.min_days_to_expiry:g} day to expiry, Deribit iv > 0.
 
 ## Result: {"PASS" if passed else "FAIL"}
 
+Done-when (decision D019), two parts, both on the inclusive view:
+
+| check | result | target | |
+|---|---|---|---|
+{vol_row}
+{px_row}
+
+Why two parts: on 1–{v.vol_target_min_days:g} day options a fraction of a tick (about 0.5 bp
+of forward) is worth up to a full vol point, so a vol target there measures the option's
+sensitivity, not the pricer. Quotes live on the tick grid, so price error is what matters.
+
+All trades, for reference:
+
 | view | median | p95 | p99 | target |
 |---|---|---|---|---|
 {row_incl}
 {row_strict}
+
+## Price error in ticks by expiry (days)
+
+{_md(tick_tbl)}
 
 All errors in vol points (1 = 0.01 vol).
 

@@ -9,12 +9,36 @@ the trade instant). Non-circular: Deribit's IV never feeds our forward.
 **Universe:** 1,340,674 trades (of 1,694,296): solver OK, not flagged suspect,
 more than 1 day to expiry, Deribit iv > 0.
 
-## Result: FAIL
+## Result: PASS
+
+Done-when (decision D019), two parts, both on the inclusive view:
+
+| check | result | target | |
+|---|---|---|---|
+| vol error, expiries > 4 days (905,121 trades) | median 0.013, p95 0.142 | median ≤ 0.05, p95 ≤ 0.25 | ✅ |
+| price error, all trades | 97.2% within ½ tick | ≥ 95% | ✅ |
+
+Why two parts: on 1–4 day options a fraction of a tick (about 0.5 bp
+of forward) is worth up to a full vol point, so a vol target there measures the option's
+sensitivity, not the pricer. Quotes live on the tick grid, so price error is what matters.
+
+All trades, for reference:
 
 | view | median | p95 | p99 | target |
 |---|---|---|---|---|
-| inclusive (inputs at the trade instant), **pass/fail** | 0.018 | 0.362 | 1.836 | median ≤ 0.05, p95 ≤ 0.25 |
+| inclusive, all trades | 0.018 | 0.362 | 1.836 | median ≤ 0.05, p95 ≤ 0.25 |
 | strict (< t − 0 ms), information lag | 0.027 | 0.478 | 2.186 | reported only |
+
+## Price error in ticks by expiry (days)
+
+| T_days | n | p95 | within_half |
+|---|---|---|---|
+| (1, 2] | 247,451 | 0.596 | 0.939 |
+| (2, 4] | 188,102 | 0.418 | 0.959 |
+| (4, 8] | 135,270 | 0.138 | 0.993 |
+| (8, 30] | 459,482 | 0.212 | 0.985 |
+| (30, 100] | 228,869 | 0.241 | 0.981 |
+| (100, 1000] | 81,500 | 0.275 | 0.974 |
 
 All errors in vol points (1 = 0.01 vol).
 
@@ -56,11 +80,10 @@ All errors in vol points (1 = 0.01 vol).
 |---|---|---|---|---|
 | 2025-01 | 220,423 | 0.017 | 0.361 | 1.593 |
 | 2025-02 | 239,968 | 0.017 | 0.530 | 3.024 |
-| 2025-03 | 214,526 | 0.019 | 0.358 | 1.755 |
-| 2025-04 | 205,698 | 0.024 | 0.421 | 2.757 |
-| 2025-05 | 273,308 | 0.016 | 0.306 | 1.277 |
-| 2025-06 | 186,521 | 0.016 | 0.244 | 1.040 |
-| 2025-07 | 230 | 0.014 | 0.114 | 0.202 |
+| 2025-03 | 215,471 | 0.019 | 0.357 | 1.750 |
+| 2025-04 | 205,065 | 0.024 | 0.422 | 2.771 |
+| 2025-05 | 273,149 | 0.016 | 0.306 | 1.277 |
+| 2025-06 | 186,598 | 0.016 | 0.244 | 1.040 |
 | all | 1,340,674 | 0.018 | 0.362 | 1.836 |
 
 ## Information lag (strict view) by expiry and |delta|
