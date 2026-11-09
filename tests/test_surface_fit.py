@@ -128,3 +128,28 @@ def test_window_is_strictly_before_refit_time(cfg):
 def test_pooling_by_moneyness_uses_each_marks_own_forward():
     df = pd.DataFrame({"strike_usd": [2000.0, 2000.0], "forward_usd": [2000.0, 2040.0]})
     assert to_moneyness(df).tolist() == pytest.approx([0.0, np.log(2000 / 2040)])
+
+
+def test_bad_warm_start_is_retried_from_cold_starts(cfg):
+    # Previous fit stuck in the wrong region (positive skew, far too high): a warm start
+    # alone can stay there; the retry must find the true smile.
+    from mm.surface.fit import Fit
+
+    bad_prev = Fit("full", ESSVI(theta=0.04, rho=0.9, psi=0.05), T, 9, 9, 50.0)
+    m = _marks(TRUE, np.linspace(-0.3, 0.3, 9))
+    fit = fit_expiry(m, prev=bad_prev, cfg=cfg.surface, t_ref=T)
+    assert fit.kind == "full"
+    assert fit.rmse_volpts < cfg.surface.retry_rmse_volpts
+    assert svi_vol(fit.params, 0.0, T) == pytest.approx(svi_vol(TRUE.to_svi(), 0.0, T), abs=1e-4)
+
+
+def test_absurd_fit_is_rejected_not_used(cfg):
+    # Marks that no smile can fit (alternating 30% / 150% vols): reject, then carry.
+    from mm.surface.fit import Fit
+
+    ks = np.linspace(-0.3, 0.3, 9)
+    m = _marks(TRUE, ks).assign(mark_iv=np.where(np.arange(9) % 2 == 0, 0.3, 1.5))
+    prev = Fit("full", TRUE, T, 9, 9, 0.1)
+    fit = fit_expiry(m, prev=prev, cfg=cfg.surface, t_ref=T, prev_age_s=300)
+    assert fit.kind == "carry" and fit.note == "rejected"
+    assert fit_expiry(m, prev=None, cfg=cfg.surface, t_ref=T).kind == "none"

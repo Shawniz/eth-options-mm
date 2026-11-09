@@ -39,6 +39,7 @@ class Fit:
     n_obs: int
     n_strikes: int
     rmse_volpts: float  # vega-weighted RMSE vs the window's marks (nan if none)
+    note: str = ""  # "retried": warm start replaced by a cold start; "rejected": fit refused
 
     @property
     def params(self) -> SVI | None:
@@ -157,13 +158,25 @@ def fit_expiry(
     if prev is not None and prev.essvi is not None:
         prev_e = prev.essvi.scaled(t_ref / prev.t_ref) if prev.t_ref != t_ref else prev.essvi
 
+    note = ""
     if n_strikes >= cfg.min_strikes_full:
+        cold = _cold_starts(k, vol, t_ref, cfg.cold_start_tries)
         if prev_e is not None:
-            x0s = [_x_from(project(prev_e, shorter), shorter)]
+            e = _solve(
+                k, vol, wt, t_ref, [_x_from(project(prev_e, shorter), shorter)], shorter, cfg
+            )
+            rm = _rmse(e.to_svi(), k, vol, wt, t_ref)
+            if rm > cfg.retry_rmse_volpts:  # warm start may be stuck: try the cold starts too
+                e2 = _solve(k, vol, wt, t_ref, cold, shorter, cfg)
+                rm2 = _rmse(e2.to_svi(), k, vol, wt, t_ref)
+                if rm2 < rm:
+                    e, rm, note = e2, rm2, "retried"
         else:
-            x0s = _cold_starts(k, vol, t_ref, cfg.cold_start_tries)
-        e = _solve(k, vol, wt, t_ref, x0s, shorter, cfg)
-        return Fit("full", e, t_ref, n_obs, n_strikes, _rmse(e.to_svi(), k, vol, wt, t_ref))
+            e = _solve(k, vol, wt, t_ref, cold, shorter, cfg)
+            rm = _rmse(e.to_svi(), k, vol, wt, t_ref)
+        if rm <= cfg.reject_rmse_volpts:
+            return Fit("full", e, t_ref, n_obs, n_strikes, rm, note)
+        note = "rejected"  # fall through: treat as if there were no usable data
 
     if prev_e is not None and prev_age_s <= cfg.max_carry_s:
         e = project(prev_e, shorter)
@@ -174,5 +187,5 @@ def fit_expiry(
             vv = svi_vol(prev_e.to_svi(), kk, t_ref)
             e = _solve(kk, vv, np.ones_like(kk), t_ref, [_x_from(e, shorter)], shorter, cfg)
         rm = _rmse(e.to_svi(), k, vol, wt, t_ref) if n_obs else float("nan")
-        return Fit("carry", e, t_ref, n_obs, n_strikes, rm)
-    return Fit("none", None, t_ref, n_obs, n_strikes, float("nan"))
+        return Fit("carry", e, t_ref, n_obs, n_strikes, rm, note)
+    return Fit("none", None, t_ref, n_obs, n_strikes, float("nan"), note)

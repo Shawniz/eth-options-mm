@@ -176,6 +176,8 @@ class SurfaceConfig(_Strict):
     min_strikes_full: int = Field(ge=3)
     max_carry_s: float = Field(ge=0)
     cold_start_tries: int = Field(ge=1)
+    retry_rmse_volpts: float = Field(gt=0)
+    reject_rmse_volpts: float = Field(gt=0)
     calendar_penalty: float = Field(gt=0)
     calendar_grid_std: float = Field(gt=0)
     calendar_grid_n: int = Field(ge=11)

@@ -97,6 +97,7 @@ def _row(r, exp_ms, fit: Fit, kgrid):
         "n_obs": fit.n_obs,
         "n_strikes": fit.n_strikes,
         "rmse_volpts": fit.rmse_volpts,
+        "note": fit.note,
         "butterfly_min_g": butterfly_min(p, kgrid) if p else np.nan,
     }
 

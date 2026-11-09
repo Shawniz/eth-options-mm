@@ -177,6 +177,8 @@ def write_report(cfg: Config, out: Path) -> bool:
         .rename(columns={"clean": "share clean"})
     )
     worst["day"] = worst["day"].dt.strftime("%Y-%m-%d")
+    n_retried = int((fits["note"] == "retried").sum()) if "note" in fits else 0
+    n_rejected = int((fits["note"] == "rejected").sum()) if "note" in fits else 0
     mark = {True: "✅", False: "❌"}
     arb_row = (
         f"| arbitrage-free refits on normal days | {clean_frac * 100:.1f}% "
@@ -211,6 +213,11 @@ variance-swap-style index, so it sits above ATM by construction).
 ## By expiry: fit error and ladder usage
 
 {_md(bucket_table(fits))}
+
+## Fit guards (D025)
+
+- Warm-started fits retried from cold starts and improved: {n_retried:,}
+- Fits rejected (RMSE > {cfg.surface.reject_rmse_volpts:g} vol points): {n_rejected:,}
 
 ## Arbitrage
 

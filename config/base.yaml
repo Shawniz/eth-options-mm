@@ -100,6 +100,9 @@ surface:                     # Surface A: SVI per expiry on Deribit mark IVs (D0
   min_strikes_full: 3          # 3 eSSVI parameters need >= 3 distinct strikes
   max_carry_s: 7200            # fewer strikes: carry previous fit if younger than this
   cold_start_tries: 6          # multistart for the first fit of an expiry
+  retry_rmse_volpts: 2.0       # warm-started fit worse than this: retry from cold starts (D025)
+  reject_rmse_volpts: 5.0      # best fit still worse than this: reject (carry/none), and it
+                               # does not constrain longer expiries (D025)
   # calendar enforcement inside the fit (D023)
   calendar_penalty: 1.0e6      # weight on w_long(k) < w_short(k) on the grid below
   calendar_grid_std: 6.0       # grid spans +- this many std of the slice (and the data)
