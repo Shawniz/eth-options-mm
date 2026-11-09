@@ -126,3 +126,12 @@ Each entry: the choice, the alternative, why, and the parameter's category:
   - parity: biased by −0.7 to −4 bp, scatter 4–10 bp
   So Deribit's synthetic forward behaves like an interpolation between futures. Parity is hurt by call/put marks up to 60 s apart. Dropping parity lowered the 95th-percentile IV error from 0.41 to 0.37 vol points. The owner chose interpolation (2026-11-09), and CLAUDE.md was updated.
 - **Why basis × index rather than the raw last future price:** dated futures can go 10–30 min without a trade (Phase 1). The basis barely moves in that time, while spot can move 1%, and on a 7-day ATM option a 1% forward error is about 9 vol points.
+
+## D018 — Two timing views: inclusive (≤ t) and strict (< t − latency)
+- **Category:** from theory (the no-lookahead rule, applied to what happens at t)
+- **Choice:** Use all information up to t, and include the information stamped *at* t unless the action at t needs a quote that already existed before t.
+  - **Inclusive (≤ t, each trade's own index):** used to validate the pricer against Deribit's trade IV, and to convert marks into mark IVs for Surface A. A refit at time R only uses trades with ts < R, so each trade's own index is known at R.
+  - **Strict (< t − latency):** used for anything a resting quote depends on: quote prices and fill decisions. The trade at t is the taker hitting our quote, which had to be in the book before t. Its own index arrives with that trade.
+  - The index series is built from every trade stream (perp, futures, options), so the latest index before any t is as fresh as the data allows.
+- **Alternative:** Strict everywhere. That would make the Phase 2 test mostly measure index update speed, and it would add timing noise to every short-dated mark IV that feeds the surface.
+- **Why:** The Phase 2 check asks whether our pricer and forward method are right, so it should use the inputs Deribit had at the trade instant. The cost of not having them (the market moving just before a trade) is real adverse selection, and it's measured by the latency experiment and the markouts, not hidden in the pricer test. The owner agreed (2026-11-09). On 1–7 Jan 2025, inclusive gave median 0.017 / p95 0.237 vol points, and strict at 0 ms gave 0.030 / 0.369.

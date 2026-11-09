@@ -33,7 +33,9 @@ def load_priced(cfg: Config) -> pd.DataFrame:
     import duckdb
 
     glob = (Path("data/cache") / CACHE_NAME / "date=*" / "*.parquet").as_posix()
-    return duckdb.sql(f"select * from read_parquet('{glob}', hive_partitioning=true)").df()
+    con = duckdb.connect()
+    con.execute("set TimeZone = 'UTC'")  # otherwise .df() converts to the laptop's local time
+    return con.sql(f"select * from read_parquet('{glob}', hive_partitioning=true)").df()
 
 
 def _summary(err_volpts: pd.Series) -> dict:
