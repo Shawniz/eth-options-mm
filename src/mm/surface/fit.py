@@ -1,13 +1,18 @@
-"""Fit one expiry's SVI smile to mark IVs, with the minimum-data ladder (decision D021).
+"""Fit one expiry's eSSVI slice to mark IVs (decisions D021, D023).
 
-    >= min_strikes_full distinct strikes        full   all 5 parameters, warm-started
-    >= min_strikes_level (and a previous fit)  level  previous shape, refit level `a` only
-    fewer, previous fit younger than max_carry  carry  previous fit, rescaled in time
+Ladder (eSSVI has 3 parameters):
+    >= min_strikes_full distinct strikes        full   (theta, rho, psi), warm-started
+    fewer, previous fit younger than max_carry  carry  previous slice, rescaled in time
+                                                       and kept calendar-consistent
     otherwise                                   none   no smile (neighbours interpolate)
 
-Objective: vega-weighted squared vol error, sum_i vega_i (sigma_svi(k_i) - sigma_i)^2, all
-marks evaluated at the refit's time to expiry t_ref (sticky vol over the window).
-Positivity of w is built in by fitting e = a + b s sqrt(1 - rho^2) >= 0 instead of a.
+Constraints, enforced in every fit:
+    butterfly: psi <= psi_max(theta, rho)                      (by construction, any k)
+    calendar vs the shorter expiry fitted at the same refit:
+        theta >= theta_short, psi >= psi_min(rho, short)       (hard bounds; necessary)
+        w(k) >= w_short(k) on a dense k grid                   (stiff penalty; sufficient
+                                                               where it matters)
+Objective: vega-weighted squared vol error at the refit's time to expiry t_ref.
 """
 
 from __future__ import annotations
@@ -19,21 +24,25 @@ import pandas as pd
 from scipy.optimize import least_squares
 
 from mm.config import SurfaceConfig
+from mm.surface.essvi import ESSVI, project, psi_max, psi_min
 from mm.surface.svi import SVI, svi_vol, svi_w
 
-# Parameter bounds for (e, b, rho, m, s). Wide enough never to bind on real smiles.
-_LO = np.array([0.0, 0.0, -0.999, -1.0, 1e-4])
-_HI = np.array([np.inf, 10.0, 0.999, 1.0, 3.0])
+RHO_MAX = 0.99
+THETA_FLOOR = 1e-8
 
 
 @dataclass(frozen=True)
 class Fit:
-    kind: str  # full | level | carry | none
-    params: SVI | None
+    kind: str  # full | carry | none
+    essvi: ESSVI | None
     t_ref: float
     n_obs: int
     n_strikes: int
     rmse_volpts: float  # vega-weighted RMSE vs the window's marks (nan if none)
+
+    @property
+    def params(self) -> SVI | None:
+        return self.essvi.to_svi() if self.essvi is not None else None
 
 
 def to_moneyness(df: pd.DataFrame) -> pd.Series:
@@ -47,33 +56,50 @@ def select_window(obs: pd.DataFrame, refit_ts: pd.Timestamp, cfg: SurfaceConfig)
     return obs[(obs["ts"] >= lo) & (obs["ts"] < refit_ts)]
 
 
-def _to_svi(x) -> SVI:
-    e, b, rho, m, s = x
-    return SVI(e - b * s * np.sqrt(1 - rho**2), b, rho, m, s)
+def _calendar_grid(shorter: ESSVI | None, theta_hint: float, k, cfg: SurfaceConfig):
+    if shorter is None:
+        return None
+    sd = np.sqrt(max(shorter.theta, theta_hint, THETA_FLOOR))
+    z = cfg.calendar_grid_std
+    lo = min(-z * sd, float(np.min(k)) if len(k) else 0.0)
+    hi = max(z * sd, float(np.max(k)) if len(k) else 0.0)
+    return np.linspace(lo, hi, cfg.calendar_grid_n)
 
 
-def _from_svi(p: SVI) -> np.ndarray:
-    x = np.array([max(p.min_variance, 0.0), p.b, p.rho, p.m, p.s])
-    return np.clip(x, _LO + 1e-12, np.where(np.isfinite(_HI), _HI - 1e-12, np.inf))
+def _decode(x, shorter):
+    theta, rho, u = float(x[0]), float(x[1]), float(x[2])
+    lo, hi = psi_min(rho, shorter), float(psi_max(theta, rho))
+    gap = max(lo - hi, 0.0)  # > 0: bounds infeasible at this (theta, rho)
+    psi = lo + u * (hi - lo) if gap == 0 else lo
+    return ESSVI(theta, rho, psi), gap
 
 
-def _rmse(p: SVI, k, vol, wt, t) -> float:
-    r = svi_vol(p, k, t) - vol
-    return float(np.sqrt(np.sum(wt * r * r) / np.sum(wt)) * 100.0)
-
-
-def _fit_full(k, vol, wt, t, x0s) -> SVI:
+def _solve(k, vol, wt, t, x0s, shorter, cfg: SurfaceConfig) -> ESSVI:
     sw = np.sqrt(wt / wt.sum())
+    theta_lo = max(shorter.theta if shorter else 0.0, THETA_FLOOR)
+    kg = _calendar_grid(shorter, float(np.median(vol**2 * t)) if len(vol) else 0.0, k, cfg)
+    w_short = svi_w(shorter.to_svi(), kg) if shorter is not None else None
+    lam = np.sqrt(cfg.calendar_penalty)
+    scale = max(shorter.theta, THETA_FLOOR) if shorter is not None else 1.0
 
     def resid(x):
-        return sw * (svi_vol(_to_svi(x), k, t) - vol)
+        e, gap = _decode(x, shorter)
+        r = sw * (svi_vol(e.to_svi(), k, t) - vol)
+        extra = [lam * gap / scale]
+        if w_short is not None:
+            extra.append(lam * np.minimum(svi_w(e.to_svi(), kg) - w_short, 0.0) / scale)
+        return np.concatenate([r, *map(np.atleast_1d, extra)])
 
+    lo = np.array([theta_lo, -RHO_MAX, 0.0])
+    hi = np.array([np.inf, RHO_MAX, 1.0])
     best = None
     for x0 in x0s:
+        x0 = np.clip(np.asarray(x0, float), lo, np.where(np.isfinite(hi), hi, 1e9))
+        x0[0] = max(x0[0], theta_lo * (1 + 1e-9))
         r = least_squares(
             resid,
             x0,
-            bounds=(_LO, _HI),
+            bounds=(lo, hi),
             method="trf",
             x_scale="jac",
             ftol=1e-14,
@@ -83,38 +109,33 @@ def _fit_full(k, vol, wt, t, x0s) -> SVI:
         )
         if best is None or r.cost < best.cost:
             best = r
-    return _to_svi(best.x)
+    return _decode(best.x, shorter)[0]
 
 
-def _cold_starts(k, vol, t, n: int) -> list[np.ndarray]:
-    w_atm = float(np.interp(0.0, np.sort(k), (vol**2 * t)[np.argsort(k)]))
-    span = max(float(np.ptp(k)), 0.05)
-    starts = []
-    for rho in (-0.5, 0.0, 0.3):
-        for s in (0.25 * span, 0.75 * span):
-            b = max(w_atm, 1e-6) / max(s, 1e-3)
-            starts.append(np.array([0.5 * w_atm, b, rho, 0.0, s]))
-    return [np.clip(x, _LO + 1e-9, np.where(np.isfinite(_HI), _HI - 1e-9, 1e9)) for x in starts[:n]]
+def _x_from(e: ESSVI, shorter) -> np.ndarray:
+    lo, hi = psi_min(e.rho, shorter), float(psi_max(e.theta, e.rho))
+    u = (e.psi - lo) / (hi - lo) if hi > lo else 0.0
+    return np.array([e.theta, np.clip(e.rho, -RHO_MAX, RHO_MAX), np.clip(u, 0.0, 1.0)])
 
 
-def _fit_level(prev: SVI, k, vol, wt, t) -> SVI:
-    """Refit a only; positivity: a >= -b s sqrt(1 - rho^2)."""
-    a_min = prev.a - prev.min_variance
-    sw = np.sqrt(wt / wt.sum())
-    shape = svi_w(SVI(0.0, prev.b, prev.rho, prev.m, prev.s), k)
+def _cold_starts(k, vol, t, n):
+    order = np.argsort(k)
+    theta0 = float(np.interp(0.0, k[order], (vol**2 * t)[order]))
+    return [
+        np.array([max(theta0, THETA_FLOOR), r, u]) for r in (-0.5, 0.0, 0.3) for u in (0.3, 0.7)
+    ][:n]
 
-    def resid(x):
-        return sw * (np.sqrt(np.maximum(x[0] + shape, 0.0) / t) - vol)
 
-    r = least_squares(
-        resid,
-        [max(prev.a, a_min + 1e-12)],
-        bounds=([a_min], [np.inf]),
-        ftol=1e-15,
-        xtol=1e-15,
-        gtol=1e-15,
-    )
-    return SVI(float(r.x[0]), prev.b, prev.rho, prev.m, prev.s)
+def _rmse(svi: SVI, k, vol, wt, t) -> float:
+    r = svi_vol(svi, k, t) - vol
+    return float(np.sqrt(np.sum(wt * r * r) / np.sum(wt)) * 100.0)
+
+
+def _violates(e: ESSVI, shorter: ESSVI | None, k, cfg: SurfaceConfig) -> bool:
+    if shorter is None:
+        return False
+    kg = _calendar_grid(shorter, e.theta, k, cfg)
+    return bool((svi_w(e.to_svi(), kg) - svi_w(shorter.to_svi(), kg)).min() < -cfg.calendar_tol)
 
 
 def fit_expiry(
@@ -123,27 +144,35 @@ def fit_expiry(
     cfg: SurfaceConfig,
     t_ref: float,
     prev_age_s: float = 0.0,
+    shorter: ESSVI | None = None,
 ) -> Fit:
-    """marks: columns k, mark_iv, vega, strike_usd (already windowed and filtered)."""
+    """marks: columns k, mark_iv, vega, strike_usd (already windowed and filtered).
+    prev: this expiry's previous fit. shorter: the next-shorter expiry's slice at this
+    refit (calendar constraint), or None for the shortest."""
     k = marks["k"].to_numpy(float)
     vol = marks["mark_iv"].to_numpy(float)
     wt = np.maximum(marks["vega"].to_numpy(float) * np.ones(len(k)), 1e-12)
-    n_obs = len(k)
-    n_strikes = int(marks["strike_usd"].nunique())
-    prev_p = None
-    if prev is not None and prev.params is not None:
-        prev_p = prev.params.scaled(t_ref / prev.t_ref) if prev.t_ref != t_ref else prev.params
+    n_obs, n_strikes = len(k), int(marks["strike_usd"].nunique())
+    prev_e = None
+    if prev is not None and prev.essvi is not None:
+        prev_e = prev.essvi.scaled(t_ref / prev.t_ref) if prev.t_ref != t_ref else prev.essvi
 
     if n_strikes >= cfg.min_strikes_full:
-        x0s = [_from_svi(prev_p)] if prev_p is not None else []
-        if prev_p is None:
+        if prev_e is not None:
+            x0s = [_x_from(project(prev_e, shorter), shorter)]
+        else:
             x0s = _cold_starts(k, vol, t_ref, cfg.cold_start_tries)
-        p = _fit_full(k, vol, wt, t_ref, x0s)
-        return Fit("full", p, t_ref, n_obs, n_strikes, _rmse(p, k, vol, wt, t_ref))
-    if n_strikes >= cfg.min_strikes_level and prev_p is not None:
-        p = _fit_level(prev_p, k, vol, wt, t_ref)
-        return Fit("level", p, t_ref, n_obs, n_strikes, _rmse(p, k, vol, wt, t_ref))
-    if prev_p is not None and prev_age_s <= cfg.max_carry_s:
-        rm = _rmse(prev_p, k, vol, wt, t_ref) if n_obs else float("nan")
-        return Fit("carry", prev_p, t_ref, n_obs, n_strikes, rm)
+        e = _solve(k, vol, wt, t_ref, x0s, shorter, cfg)
+        return Fit("full", e, t_ref, n_obs, n_strikes, _rmse(e.to_svi(), k, vol, wt, t_ref))
+
+    if prev_e is not None and prev_age_s <= cfg.max_carry_s:
+        e = project(prev_e, shorter)
+        if _violates(e, shorter, k, cfg):
+            # refit to its own previous shape under the current constraints
+            sd = np.sqrt(max(prev_e.theta, THETA_FLOOR))
+            kk = np.linspace(-2.5 * sd, 2.5 * sd, 21)
+            vv = svi_vol(prev_e.to_svi(), kk, t_ref)
+            e = _solve(kk, vv, np.ones_like(kk), t_ref, [_x_from(e, shorter)], shorter, cfg)
+        rm = _rmse(e.to_svi(), k, vol, wt, t_ref) if n_obs else float("nan")
+        return Fit("carry", e, t_ref, n_obs, n_strikes, rm)
     return Fit("none", None, t_ref, n_obs, n_strikes, float("nan"))

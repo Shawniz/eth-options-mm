@@ -3,11 +3,12 @@ import pandas as pd
 
 from mm.pricing.black76 import price_eth
 from mm.surface.build import build_refits
-from mm.surface.svi import SVI, svi_vol
+from mm.surface.essvi import ESSVI
+from mm.surface.svi import svi_vol
 
 R0 = pd.Timestamp("2025-03-03 12:00", tz="UTC")
 EXP = pd.Timestamp("2025-03-28 08:00", tz="UTC")
-TRUE = SVI(a=0.006, b=0.04, rho=-0.3, m=0.0, s=0.1)
+TRUE = ESSVI(theta=0.01, rho=-0.3, psi=0.045).to_svi()
 
 
 def _priced(n_min=55, strikes=(1700, 1850, 2000, 2150, 2300, 2450), f=2000.0):
@@ -40,7 +41,7 @@ def test_surface_at_R_ignores_marks_at_or_after_R(cfg):
     later = base.iloc[[-1]].assign(ts=R0 + pd.Timedelta("1s"), mark_iv=3.0)
     a = build_refits(base, cfg, refit_times=[R0])
     b = build_refits(pd.concat([base, spike, later], ignore_index=True), cfg, refit_times=[R0])
-    cols = ["kind", "a", "b", "rho", "m", "s"]
+    cols = ["kind", "theta", "rho_e", "psi"]
     pd.testing.assert_frame_equal(a.fits[cols], b.fits[cols])
 
 
@@ -49,4 +50,20 @@ def test_build_produces_full_fit_and_stats(cfg):
     row = out.fits.iloc[0]
     assert row["kind"] == "full" and row["n_strikes"] == 6
     assert row["rmse_volpts"] < 0.05
-    assert out.refits["any_butterfly"].iloc[0] == False  # noqa: E712
+    assert not out.refits["any_butterfly"].iloc[0]
+    assert not out.refits["any_calendar"].iloc[0]
+
+
+def test_build_is_independent_of_worker_count(cfg):
+    times = [R0 - pd.Timedelta(minutes=5), R0]
+    one = build_refits(
+        _priced(),
+        cfg.model_copy(update={"surface": cfg.surface.model_copy(update={"n_workers": 1})}),
+        refit_times=times,
+    )
+    many = build_refits(
+        _priced(),
+        cfg.model_copy(update={"surface": cfg.surface.model_copy(update={"n_workers": 4})}),
+        refit_times=times,
+    )
+    pd.testing.assert_frame_equal(one.fits, many.fits)

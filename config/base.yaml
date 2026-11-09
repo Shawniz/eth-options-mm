@@ -94,19 +94,23 @@ surface:                     # Surface A: SVI per expiry on Deribit mark IVs (D0
   min_fit_hours: 2.0           # expiries closer than this are not fitted
   min_mark_price_eth: 0.0002   # IV backed out of a tiny mark price is noise
   max_mark_iv: 5.0             # 500%; above this the solver sat near its bracket
-  # minimum-data ladder (D021): full -> level -> carry -> none
-  min_strikes_full: 5          # 5 SVI parameters need >= 5 distinct strikes
-  min_strikes_level: 3         # 3-4 strikes: keep previous shape, refit level `a`
-  max_carry_s: 7200            # 1-2 strikes: carry previous fit if younger than this
+  # minimum-data ladder (D021, revised for eSSVI in D023): full -> carry -> none
+  min_strikes_full: 3          # 3 eSSVI parameters need >= 3 distinct strikes
+  max_carry_s: 7200            # fewer strikes: carry previous fit if younger than this
   cold_start_tries: 6          # multistart for the first fit of an expiry
-  # arbitrage checks (flag, not enforce; D022)
+  # calendar enforcement inside the fit (D023)
+  calendar_penalty: 1.0e6      # weight on w_long(k) < w_short(k) on the grid below
+  calendar_grid_std: 6.0       # grid spans +- this many std of the slice (and the data)
+  calendar_grid_n: 121
+  # arbitrage re-checks on every refit (D022, D023)
   k_grid: [-1.5, 1.5, 121]     # log-moneyness grid (lo, hi, points)
   butterfly_tol: 1.0e-9        # g(k) < -tol is a violation
   calendar_tol: 1.0e-7         # w(k,T2) < w(k,T1) - tol is a violation
   # summary statistics
   stats_interval_s: 3600       # per-expiry ATM / RR25 / BF25 every hour
   const_maturity_days: 30      # constant-maturity smile compared with DVOL
-  n_workers: 8                 # parallel fitting across expiries
+  n_workers: 8                 # parallel across time chunks
+  chunk_days: 7                # fixed chunks (+ warm-up), so results don't depend on n_workers
   validation:                  # Phase 3 done-when
     target_rmse_median_volpts: 0.3   # vega-weighted RMSE of full fits
     target_rmse_p95_volpts: 1.0

@@ -160,23 +160,20 @@ class SurfaceConfig(_Strict):
     min_fit_hours: float = Field(ge=0)
     min_mark_price_eth: float = Field(ge=0)
     max_mark_iv: float = Field(gt=0)
-    min_strikes_full: int = Field(ge=5)
-    min_strikes_level: int = Field(ge=1)
+    min_strikes_full: int = Field(ge=3)
     max_carry_s: float = Field(ge=0)
     cold_start_tries: int = Field(ge=1)
+    calendar_penalty: float = Field(gt=0)
+    calendar_grid_std: float = Field(gt=0)
+    calendar_grid_n: int = Field(ge=11)
     k_grid: tuple[float, float, int]
     butterfly_tol: float = Field(ge=0)
     calendar_tol: float = Field(ge=0)
     stats_interval_s: int = Field(gt=0)
     const_maturity_days: float = Field(gt=0)
     n_workers: int = Field(ge=1)
+    chunk_days: float = Field(gt=0)
     validation: SurfaceValidation
-
-    @model_validator(mode="after")
-    def _ladder(self) -> SurfaceConfig:
-        if not self.min_strikes_level < self.min_strikes_full:
-            raise ValueError("min_strikes_level must be < min_strikes_full")
-        return self
 
 
 class Config(_Strict):
