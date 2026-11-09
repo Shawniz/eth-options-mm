@@ -171,10 +171,10 @@ Work in order. A phase is finished only when every "done when" check passes.
 - **Done when:** put-call parity and IV round-trip tests pass, the Deribit ticker fixture passes, and on historical trades (inclusive timing, D018) our IV vs Deribit's trade IV has median ≤ 0.05 and p95 ≤ 0.25 vol points for expiries > 4 days, and ≥ 95% of all trades are reproduced within ½ tick of price (D019). `uv run python -m mm.pricing.validate --config config/base.yaml`.
 
 ### Phase 3: Surface A (2 days)
-- Mark prices → mark IVs. At each refit, fit SVI per expiry to mark IVs from a trailing window (30–60 min), pooling in log-moneyness k = ln(K/F) at each observation's own time, vega-weighted, warm-started from the previous fit, with minimum-data rules.
+- Mark prices → mark IVs. At each refit, fit an eSSVI slice (θ, ρ, ψ; butterfly-free by construction, calendar-constrained against the shorter expiry; D023) per expiry to mark IVs from a trailing window (60 min, D020), pooling in log-moneyness k = ln(K/F) at each observation's own time, vega- and recency-weighted, warm-started from the previous fit, with minimum-data rules (full → carry → none; D021, D026).
 - Butterfly (Gatheral g(k) ≥ 0) and calendar (total variance non-decreasing in T) checks on a k grid; interpolate across expiries linearly in total variance.
 - Time series of ATM vol, 25-delta risk reversal and 25-delta butterfly (25-delta strikes found by root-finding with the smile's own vol).
-- **Done when:** fit error against marks is small, no arbitrage is flagged on normal days, and 30-day ATM vol tracks DVOL.
+- **Done when:** fit error against marks meets the per-expiry-bucket targets, ≥ 95% of refits on normal days have no arbitrage flag, and 30-day ATM vol tracks DVOL (daily-change correlation ≥ 0.6, DVOL − ATM within [0, 8] vol points in ≥ 95% of hours) (D026). `uv run python -m mm.surface.report --config config/base.yaml`.
 
 ### Phase 4: Simulator (3 days)
 - Event loop, strict fill model, maker fees, funding accrual, expiry settlement, accounting invariants, fill log.

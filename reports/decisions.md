@@ -147,3 +147,76 @@ Each entry: the choice, the alternative, why, and the parameter's category:
 - **Why:** Our forward is within 0.33 bp (with a future) and 0.58 bp (interpolated) of the forward Deribit must have used. On 1–4 day options, half a basis point of forward (a fraction of a tick) is worth up to a full vol point. So a vol target there measures the option's sensitivity, not the pricer. Quotes sit on the tick grid, so price error is the error that matters.
 - **Result (H1 2025):** PASS. Beyond 4 days: median 0.013, p95 0.142. All trades: 97.2% within ½ tick.
 - **Consequence for Phase 5:** for 1–4 day options, small index moves change the IV by about 1 vol point at p95 even at 0 ms latency. Wider spreads or a near-expiry cut-off (`min_hours_to_expiry`) will be needed there.
+
+## D020 — Surface A trailing window: 60 minutes
+- **Category:** free choice, within CLAUDE.md's 30–60 min range
+- **Choice:** A refit at R uses mark IVs with R − 60 min ≤ ts < R (`surface.trailing_window_s: 3600`).
+- **Alternative:** 30 minutes.
+- **Why:** Marks only exist where trades happen. With 30 minutes, many expiries beyond a few weeks have too few distinct strikes to fit. Recency weighting (D024) keeps the longer window from making the level stale.
+
+## D021 — Minimum-data ladder: full → carry → none
+- **Category:** free choice
+- **Choice:** Per expiry and refit:
+  - **full:** enough data to fit (rule in D026).
+  - **carry:** otherwise, if the last full fit is younger than `max_carry_s` (2 h), keep it, rescaled in time and projected to stay calendar-consistent.
+  - **none:** otherwise no smile; neighbouring expiries interpolate.
+- **Alternative:** Always fit whatever data there is, or drop expiries without data.
+- **Why:** A smile fitted to one or two strikes is arbitrary. Dropping it entirely loses an expiry for a few minutes after every quiet spell. The owner approved it (2026-11-09).
+
+## D022 — Arbitrage: enforce inside the fit, then flag on every refit
+- **Category:** from theory, plus evidence
+- **Choice:** Butterfly and calendar conditions are built into the fit (D023). Every refit is still re-checked on a k grid (Gatheral g(k) ≥ 0; total variance non-decreasing in T), and flags are reported.
+- **Alternative:** Fit free raw SVI and only flag.
+- **Why:** With free SVI, close to 100% of refits were flagged. Thinly sampled expiries produced degenerate fits (ρ → −1, m at its bound). A flag-only approach would have left the simulator pricing off arbitrageable smiles.
+
+## D023 — eSSVI slices instead of free raw SVI
+- **Category:** from theory (Hendriks & Martini 2019; Gatheral & Jacquier 2014). Owner decision, 2026-11-09.
+- **Choice:** Each expiry is an eSSVI slice (θ, ρ, ψ):
+  - **Butterfly-free by construction:** ψ ≤ ψ_max(θ, ρ).
+  - **Calendar, against the next-shorter expiry fitted at the same refit:**
+    - hard bounds θ ≥ θ_short and ψ ≥ ψ_min (wing slopes ordered), which are necessary;
+    - plus a stiff penalty on w_long(k) < w_short(k) on a dense k grid.
+  - Expiries are fitted short → long.
+- **Alternative:** Raw SVI (5 parameters per expiry) with soft penalties.
+- **Why:** With 3 parameters, eSSVI fits on fewer strikes and can't go degenerate.
+  - The recalled sufficient calendar condition turned out not to be sufficient: a hypothesis property test found a counterexample (`test_wing_conditions_alone_are_not_sufficient`). Hence the grid penalty.
+  - Cost: less flexible smiles, so fit error is a little higher than free SVI where data is rich.
+
+## D024 — Recency weighting inside the window: τ = 600 s
+- **Category:** free choice
+- **Choice:** Weight = vega × exp(−age / 600 s).
+- **Alternative:** Equal weights across the window.
+- **Why:** In a 60-minute window, a level move in the last 10 minutes would otherwise be averaged with 50 minutes of older marks. Older marks still help pin the smile's shape.
+
+## D025 — Fit guards: retry stuck warm starts, reject absurd fits
+- **Category:** free choice
+- **Choice:**
+  - If a warm-started fit has RMSE > 2 vol points, also run the cold starts and keep the better fit.
+  - If the best fit is still > 5 vol points, reject it: the expiry carries or gets none, and it does not constrain longer expiries.
+- **Alternative:** Trust the warm start.
+- **Why:** In the first full build, one warm start on an 8.6-day expiry got stuck at RMSE 142. Through the calendar bounds it pushed every longer expiry up, which produced 924 spikes in the 30-day ATM.
+
+## D026 — Full fits need identified data; DVOL check on daily changes; per-bucket error targets
+- **Category:** free choice (owner decision, 2026-11-09), backed by data
+- **Choices:**
+  1. **full** needs ≥ 4 distinct strikes (more than the 3 parameters) **and** strikes on both sides of the forward. Otherwise carry or none (D021).
+  2. **DVOL check:**
+     - the correlation of **daily** changes of the 30-day ATM vs DVOL must be ≥ 0.6;
+     - DVOL − ATM must stay in [0, 8] vol points in ≥ 95% of hours.
+     The hourly-change correlation is reported for information only.
+  3. **RMSE targets per expiry bucket** (median / p95, vol points):
+     - 0–2 d: 1.25 / 4.0
+     - 2–8 d: 0.75 / 3.0
+     - 8–35 d: 0.40 / 2.0
+     - 35–100 d: 0.30 / 1.5
+     - over 100 d: 0.30 / 1.5
+- **Alternatives:**
+  - The provisional single target (0.3 / 1.0 on all expiries).
+  - An hourly-change correlation ≥ 0.8.
+  - Adding more fitting machinery: a level-only rung, or temporal priors.
+- **Why:**
+  - **Hourly noise came from one place.** The second build still had an hourly correlation of 0.17. Each expiry's fitted ATM matched its own near-ATM marks well (std 0.7 vol points). The noise came from the monthly expiry just past 30 days, which trades 1–4 strikes an hour: 3 strikes give an exact 3-parameter fit at an arbitrary ATM level (e.g. 25-Apr on 2025-03-17: 85 → 52 → 69 within an hour).
+  - **The hourly test is too strict for trade-time marks.** A model-free proxy, the last near-ATM mark of any 20–45 day expiry, only reaches 0.60 hourly against DVOL, because hourly DVOL moves (std 0.64 vol points) are small next to the sampling noise of trade marks.
+  - **The level band reflects construction.** DVOL is a variance-swap-style index and sits above ATM by construction (mean gap 3.2).
+  - **Error targets are tied to the spreads we'll quote.** For quoted expiries, the median error sits below the narrowest half-spread tested in Phase 8 (0.5 vol points), and p95 below the wider ones. The 0–2 day bucket is looser: tiny premiums, and Phase 5 will likely cut it off.
+- **Caveat:** these targets were set after seeing the data. They show the surface is fit for its use; they are not an independent test.
