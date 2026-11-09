@@ -87,6 +87,29 @@ fill:
   # Fill size = min(trade size, our quote size) * max_fill_fraction.
   max_fill_fraction: 0.5
 
-surface:
-  refit_interval_s: 300  # 1–5 minutes allowed
-  trailing_window_s: 1800  # TODO(Phase 3): tune
+surface:                     # Surface A: SVI per expiry on Deribit mark IVs (D020-D022)
+  refit_interval_s: 300        # 1-5 minutes allowed
+  trailing_window_s: 3600      # marks with R - window <= ts < R (30 min too sparse, D020)
+  # input filters
+  min_fit_hours: 2.0           # expiries closer than this are not fitted
+  min_mark_price_eth: 0.0002   # IV backed out of a tiny mark price is noise
+  max_mark_iv: 5.0             # 500%; above this the solver sat near its bracket
+  # minimum-data ladder (D021): full -> level -> carry -> none
+  min_strikes_full: 5          # 5 SVI parameters need >= 5 distinct strikes
+  min_strikes_level: 3         # 3-4 strikes: keep previous shape, refit level `a`
+  max_carry_s: 7200            # 1-2 strikes: carry previous fit if younger than this
+  cold_start_tries: 6          # multistart for the first fit of an expiry
+  # arbitrage checks (flag, not enforce; D022)
+  k_grid: [-1.5, 1.5, 121]     # log-moneyness grid (lo, hi, points)
+  butterfly_tol: 1.0e-9        # g(k) < -tol is a violation
+  calendar_tol: 1.0e-7         # w(k,T2) < w(k,T1) - tol is a violation
+  # summary statistics
+  stats_interval_s: 3600       # per-expiry ATM / RR25 / BF25 every hour
+  const_maturity_days: 30      # constant-maturity smile compared with DVOL
+  n_workers: 8                 # parallel fitting across expiries
+  validation:                  # Phase 3 done-when
+    target_rmse_median_volpts: 0.3   # vega-weighted RMSE of full fits
+    target_rmse_p95_volpts: 1.0
+    normal_day_dvol_quantile: 0.9    # 'normal' = |daily DVOL change| below this quantile
+    target_arb_free_frac: 0.95       # share of refits with no flag on normal days
+    target_dvol_change_corr: 0.8     # hourly changes, 30d ATM vs DVOL

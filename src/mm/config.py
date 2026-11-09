@@ -146,9 +146,37 @@ class FillConfig(_Strict):
     max_fill_fraction: float = Field(gt=0.0, le=1.0)
 
 
+class SurfaceValidation(_Strict):
+    target_rmse_median_volpts: float = Field(gt=0)
+    target_rmse_p95_volpts: float = Field(gt=0)
+    normal_day_dvol_quantile: float = Field(gt=0, lt=1)
+    target_arb_free_frac: float = Field(gt=0, le=1)
+    target_dvol_change_corr: float = Field(gt=-1, le=1)
+
+
 class SurfaceConfig(_Strict):
     refit_interval_s: int = Field(ge=60, le=300)
     trailing_window_s: int = Field(gt=0)
+    min_fit_hours: float = Field(ge=0)
+    min_mark_price_eth: float = Field(ge=0)
+    max_mark_iv: float = Field(gt=0)
+    min_strikes_full: int = Field(ge=5)
+    min_strikes_level: int = Field(ge=1)
+    max_carry_s: float = Field(ge=0)
+    cold_start_tries: int = Field(ge=1)
+    k_grid: tuple[float, float, int]
+    butterfly_tol: float = Field(ge=0)
+    calendar_tol: float = Field(ge=0)
+    stats_interval_s: int = Field(gt=0)
+    const_maturity_days: float = Field(gt=0)
+    n_workers: int = Field(ge=1)
+    validation: SurfaceValidation
+
+    @model_validator(mode="after")
+    def _ladder(self) -> SurfaceConfig:
+        if not self.min_strikes_level < self.min_strikes_full:
+            raise ValueError("min_strikes_level must be < min_strikes_full")
+        return self
 
 
 class Config(_Strict):
