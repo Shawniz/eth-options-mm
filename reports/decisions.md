@@ -112,3 +112,17 @@ Each entry: the choice, the alternative, why, and the parameter's category:
 - **Alternatives:** A flat price tolerance, which fails deep ITM long-dated options for reasons unrelated to the formula. Or solving each option's implied forward, which is noise-dominated because marks are rounded to 1e-4.
 - **Why:** With Deribit's own displayed forward and mark_iv, 90% of marks match to rounding plus 0.7 bp of forward; the worst case is 5.2 bp (26MAR27, where calls and puts agree on the offset). The residual is timing between each ticker's displayed `underlying_price` and the forward behind its mark, not a formula error. The Greeks match Deribit's display rounding.
 - **Finding:** for expiries under 7 days, Deribit's displayed theta follows a different convention (a factor of 1.1–10 from the analytic value). Ours is the analytic derivative, checked against finite differences. The project never uses the theta Greek for P&L (attribution uses full revaluation), so this has no effect.
+
+## D017 — Forwards: basis × latest index; interpolate for expiries without a future (not parity)
+- **Category:** from data (tested against Deribit)
+- **Choice:** `F(t) = basis × index`, with every input strictly before `t − latency`.
+  - **Expiries with a dated future:** basis = mark / index from the latest trade of that future (stale after 1 h).
+  - **Expiries without a future:** ln(basis) is interpolated linearly in T between the futures, through ln b = 0 at T = 0. Beyond the last future, annualised carry is held flat.
+  - Put-call parity on marks is kept as `pricing.forwards.non_future_source: parity` and as a diagnostic.
+- **Alternative:** Put-call parity on option marks for expiries without a future, as CLAUDE.md first said.
+- **Why:** For each trade, the forward Deribit must have used can be backed out from its trade IV. We did this for diagnosis only; it never feeds the pipeline, so the validation stays non-circular. On 1–7 Jan 2025:
+  - future: median gap ±0.07 bp, typical scatter 0.3–0.8 bp
+  - interpolation: ±0.2 bp, scatter 0.6–1.0 bp
+  - parity: biased by −0.7 to −4 bp, scatter 4–10 bp
+  So Deribit's synthetic forward behaves like an interpolation between futures. Parity is hurt by call/put marks up to 60 s apart. Dropping parity lowered the 95th-percentile IV error from 0.41 to 0.37 vol points. The owner chose interpolation (2026-11-09), and CLAUDE.md was updated.
+- **Why basis × index rather than the raw last future price:** dated futures can go 10–30 min without a trade (Phase 1). The basis barely moves in that time, while spot can move 1%, and on a 7-day ATM option a 1% forward error is about 9 vol points.

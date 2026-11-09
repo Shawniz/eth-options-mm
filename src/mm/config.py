@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -103,6 +104,7 @@ class Specs(_Strict):
 
 class ForwardsConfig(_Strict):
     future_basis_max_age_s: float = Field(gt=0)
+    non_future_source: Literal["interp", "parity"]
     parity_pair_window_s: float = Field(gt=0)
     parity_atm_band: float = Field(gt=0)
     parity_n_pairs: int = Field(ge=1)

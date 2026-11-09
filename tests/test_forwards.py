@@ -23,6 +23,11 @@ def fcfg(cfg):
     return cfg.pricing.forwards
 
 
+@pytest.fixture
+def pcfg(fcfg):
+    return fcfg.model_copy(update={"non_future_source": "parity"})
+
+
 def _fut(rows):
     """rows: (ts, mark, index) for ETH-28MAR25."""
     return pd.DataFrame(
@@ -132,7 +137,8 @@ def test_parity_ignores_pairs_too_far_apart_or_off_atm(fcfg):
     assert len(parity_basis_obs(wing, fcfg)) == 0
 
 
-def test_parity_forward_for_expiry_without_future(fcfg):
+def test_parity_forward_for_expiry_without_future(pcfg):
+    fcfg = pcfg
     parity = parity_basis_obs(_pair_trades(2004.0, 2000.0, MAR07, 4 / 365, T0), fcfg)
     fc = _curve(
         _fut([(T0, 2020.0, 2000.0)]), _idx([(T0, 2000.0), (T0 + MIN, 2010.0)]), fcfg, parity
@@ -142,7 +148,8 @@ def test_parity_forward_for_expiry_without_future(fcfg):
     assert r.forward_usd == pytest.approx(1.002 * 2010.0)
 
 
-def test_parity_needs_min_pairs(fcfg):
+def test_parity_needs_min_pairs(pcfg):
+    fcfg = pcfg
     trades = _pair_trades(2004.0, 2000.0, MAR07, 4 / 365, T0, strikes=(2000.0,))
     parity = parity_basis_obs(trades, fcfg)
     assert len(parity) < fcfg.parity_min_pairs
@@ -184,7 +191,15 @@ def test_no_index_gives_nan(fcfg):
 # ---------- vectorised path used on 1.7M trades ----------
 
 
-def test_vectorised_matches_scalar(fcfg):
+def test_default_ignores_parity_and_interpolates(fcfg):
+    assert fcfg.non_future_source == "interp"
+    parity = parity_basis_obs(_pair_trades(2004.0, 2000.0, MAR07, 4 / 365, T0), fcfg)
+    fc = _curve(_fut([(T0, 2020.0, 2000.0)]), _idx([(T0, 2000.0)]), fcfg, parity)
+    assert fc.forward(MAR07, at=T0 + 2 * MIN, latency_ms=0).source == "interp"
+
+
+def test_vectorised_matches_scalar(pcfg):
+    fcfg = pcfg
     parity = parity_basis_obs(_pair_trades(2004.0, 2000.0, MAR07, 4 / 365, T0), fcfg)
     fc = _curve(
         _fut([(T0, 2020.0, 2000.0)]), _idx([(T0, 2000.0), (T0 + MIN, 2010.0)]), fcfg, parity

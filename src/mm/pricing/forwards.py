@@ -7,8 +7,10 @@ index). See decisions D017–D018.
 
 Basis sources, in order of preference:
     future  the matching dated future: mark / index from the SAME trade
-    parity  put-call parity on option marks, F = K / (1 - (c - p)), median of recent
-            near-ATM call/put pairs (a pair is known once both legs have traded)
+    parity  ONLY if cfg.non_future_source == "parity": put-call parity on option marks,
+            F = K / (1 - (c - p)), median of recent near-ATM call/put pairs (a pair is
+            known once both legs have traded). Default off: tested against Deribit it is
+            biased and noisy (decision D017); kept as an option and a diagnostic.
     interp  ln(basis) interpolated linearly in T between expiries that have a basis
             (ln basis = 0 at T = 0; flat annualised carry beyond the last expiry)
     none    no index yet, expired, or nothing to interpolate from
@@ -121,6 +123,8 @@ class ForwardCurve:
             )
 
         self._par: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        if cfg.non_future_source != "parity":
+            parity_obs = parity_obs.iloc[0:0]
         for exp, g in parity_obs.groupby("expiry"):
             g = g.sort_values("ts", kind="stable")
             med = (

@@ -91,7 +91,7 @@ Most bugs here will be silent unit errors.
 
 ## Pricing (agreed maths)
 
-- Price off the **forward** F for each expiry (from the matching future, or put-call parity where none exists) using **Black-76, undiscounted**:
+- Price off the **forward** F for each expiry using **Black-76, undiscounted**. F = basis × latest index, where basis = mark/index of the matching dated future; for expiries without a future, ln(basis) is interpolated linearly in T between the futures (put-call parity was tested and rejected; decision D017):
   `C = F·N(d1) − K·N(d2)`, `d1 = [ln(F/K) + ½σ²T] / (σ√T)`, `d2 = d1 − σ√T`.
 - **ETH premium = C / F.** (USD discounting is absorbed into F; ETH discounting ≈ 0 on Deribit.) Verify against Deribit mark prices.
 - Black delta `N(d1)` is the per-option delta. Do **not** apply an F/S factor for Deribit's coin-settled options.
