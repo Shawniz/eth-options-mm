@@ -122,8 +122,17 @@ class ForwardsConfig(_Strict):
         return self
 
 
+class ValidationConfig(_Strict):
+    min_days_to_expiry: float = Field(ge=0)
+    target_median_volpts: float = Field(gt=0)
+    target_p95_volpts: float = Field(gt=0)
+    forward_gap_sample: int = Field(gt=0)
+    seed: int
+
+
 class PricingConfig(_Strict):
     forwards: ForwardsConfig
+    validation: ValidationConfig
 
 
 class SimConfig(_Strict):

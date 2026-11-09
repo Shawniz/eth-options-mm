@@ -15,7 +15,12 @@ Basis sources, in order of preference:
             (ln basis = 0 at T = 0; flat annualised carry beyond the last expiry)
     none    no index yet, expired, or nothing to interpolate from
 
-No lookahead: every input is strictly before cutoff = t - latency.
+Two timing modes (decision D018):
+    strict     (default) inputs strictly before cutoff = t - latency. For quoting and
+               fills: our quote had to be resting before the taker's trade arrived.
+    inclusive  inputs up to and including t, optionally with each trade's own index.
+               For validating against Deribit's trade IV and for Surface A's mark IVs
+               (all such trades are before the refit time, so this is not lookahead).
 """
 
 from __future__ import annotations
@@ -139,8 +144,9 @@ class ForwardCurve:
 
     # --- basis for one expiry at many cutoffs ---
     @staticmethod
-    def _latest(ts: np.ndarray, val: np.ndarray, cutoff: np.ndarray, max_age_ms: float):
-        i = np.searchsorted(ts, cutoff, side="left") - 1  # last obs strictly before cutoff
+    def _latest(ts, val, cutoff, max_age_ms: float, side: str):
+        # side="left": last obs strictly before cutoff; side="right": at or before cutoff
+        i = np.searchsorted(ts, cutoff, side=side) - 1
         ok = i >= 0
         b = np.full(cutoff.shape, np.nan)
         age = np.full(cutoff.shape, np.nan)
@@ -150,30 +156,30 @@ class ForwardCurve:
         b[stale] = np.nan
         return b, age
 
-    def _basis_direct(self, exp_ms: int, cutoff: np.ndarray):
+    def _basis_direct(self, exp_ms: int, cutoff: np.ndarray, side: str):
         basis = np.full(cutoff.shape, np.nan)
         age = np.full(cutoff.shape, np.nan)
         src = np.full(cutoff.shape, "none", dtype=object)
         if exp_ms in self._fut:
             ts, val = self._fut[exp_ms]
-            b, a = self._latest(ts, val, cutoff, self.cfg.future_basis_max_age_s * 1000)
+            b, a = self._latest(ts, val, cutoff, self.cfg.future_basis_max_age_s * 1000, side)
             hit = np.isfinite(b)
             basis[hit], age[hit], src[hit] = b[hit], a[hit], "future"
         if exp_ms in self._par:
             ts, val = self._par[exp_ms]
-            b, a = self._latest(ts, val, cutoff, self.cfg.parity_max_age_s * 1000)
+            b, a = self._latest(ts, val, cutoff, self.cfg.parity_max_age_s * 1000, side)
             hit = np.isfinite(b) & ~np.isfinite(basis)
             basis[hit], age[hit], src[hit] = b[hit], a[hit], "parity"
         return basis, age, src
 
-    def _interp(self, exp_ms: np.ndarray, cutoff: np.ndarray) -> np.ndarray:
+    def _interp(self, exp_ms: np.ndarray, cutoff: np.ndarray, side: str) -> np.ndarray:
         """ln(basis) linear in T through (0, 0) and every expiry with a direct basis."""
         out = np.full(cutoff.shape, np.nan)
         if len(self._known) == 0 or len(cutoff) == 0:
             return out
         grid = np.full((len(cutoff), len(self._known)), np.nan)
         for j, e in enumerate(self._known):
-            b, _, _ = self._basis_direct(int(e), cutoff)
+            b, _, _ = self._basis_direct(int(e), cutoff, side)
             grid[:, j] = np.log(b)
         t_known = (self._known[None, :] - cutoff[:, None]) / MS_PER_YEAR
         t_q = (exp_ms - cutoff) / MS_PER_YEAR
@@ -190,25 +196,41 @@ class ForwardCurve:
                 out[r] = np.exp(lb[-1] / ts_[-1] * t_q[r])
         return out
 
-    def forwards(self, ts: pd.Series, expiry: pd.Series, latency_ms: int) -> pd.DataFrame:
+    def forwards(
+        self,
+        ts: pd.Series,
+        expiry: pd.Series,
+        latency_ms: int,
+        inclusive: bool = False,
+        index: pd.Series | None = None,
+    ) -> pd.DataFrame:
+        """Vectorised forwards. `index` (each row's own index) requires inclusive=True."""
+        if index is not None and not inclusive:
+            raise ValueError("an index override is information AT t: requires inclusive=True")
+        side = "right" if inclusive else "left"
         cutoff = _ms(pd.Series(ts).reset_index(drop=True)) - int(latency_ms)
         exp_ms = _ms(pd.Series(expiry).reset_index(drop=True))
         n = len(cutoff)
-        j = np.searchsorted(self._idx_ts, cutoff, side="left") - 1
-        index = np.where(j >= 0, self._idx_val[np.clip(j, 0, None)], np.nan) if n else np.array([])
+        if index is not None:
+            index = pd.Series(index).reset_index(drop=True).to_numpy(float)
+        elif n:
+            j = np.searchsorted(self._idx_ts, cutoff, side=side) - 1
+            index = np.where(j >= 0, self._idx_val[np.clip(j, 0, None)], np.nan)
+        else:
+            index = np.array([])
 
         basis = np.full(n, np.nan)
         age = np.full(n, np.nan)
         src = np.full(n, "none", dtype=object)
         for e in np.unique(exp_ms):
             rows = np.flatnonzero(exp_ms == e)
-            b, a, s = self._basis_direct(int(e), cutoff[rows])
+            b, a, s = self._basis_direct(int(e), cutoff[rows], side)
             basis[rows], age[rows], src[rows] = b, a, s
 
         need = ~np.isfinite(basis) & (exp_ms > cutoff)
         if need.any():
             rows = np.flatnonzero(need)
-            b = self._interp(exp_ms[rows], cutoff[rows])
+            b = self._interp(exp_ms[rows], cutoff[rows], side)
             hit = np.isfinite(b)
             basis[rows[hit]] = b[hit]
             src[rows[hit]] = "interp"

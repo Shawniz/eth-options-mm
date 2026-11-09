@@ -211,3 +211,35 @@ def test_vectorised_matches_scalar(pcfg):
         one = fc.forward(exp[i], at=ts[i], latency_ms=0)
         assert out["forward_usd"].iloc[i] == pytest.approx(one.forward_usd)
         assert out["source"].iloc[i] == one.source
+
+
+# ---------- inclusive (<= t) mode: validation and Surface A inputs ----------
+
+
+def test_inclusive_uses_information_stamped_at_t(fcfg):
+    t = T0 + 10 * MIN
+    fut = _fut([(T0, 2020.0, 2000.0), (t, 2030.0, 2000.0)])  # a future print AT t
+    fc = _curve(fut, _idx([(T0, 2000.0), (t, 2100.0)]), fcfg)
+    strict = fc.forward(MAR28, at=t, latency_ms=0)
+    incl = fc.forwards(pd.Series([t]), pd.Series([MAR28]), latency_ms=0, inclusive=True)
+    assert strict.forward_usd == pytest.approx(1.010 * 2000.0)
+    assert incl["forward_usd"].iloc[0] == pytest.approx(1.015 * 2100.0)
+
+
+def test_index_override_uses_each_trades_own_index(fcfg):
+    fc = _curve(_fut([(T0, 2020.0, 2000.0)]), _idx([(T0, 2000.0)]), fcfg)
+    out = fc.forwards(
+        pd.Series([T0 + MIN]),
+        pd.Series([MAR28]),
+        latency_ms=0,
+        inclusive=True,
+        index=pd.Series([2050.0]),
+    )
+    assert out["forward_usd"].iloc[0] == pytest.approx(1.01 * 2050.0)
+    assert out["index_usd"].iloc[0] == 2050.0
+
+
+def test_index_override_not_allowed_in_strict_mode(fcfg):
+    fc = _curve(_fut([(T0, 2020.0, 2000.0)]), _idx([(T0, 2000.0)]), fcfg)
+    with pytest.raises(ValueError, match="inclusive"):
+        fc.forwards(pd.Series([T0 + MIN]), pd.Series([MAR28]), 0, index=pd.Series([1.0]))

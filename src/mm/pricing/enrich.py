@@ -5,10 +5,13 @@
 Reads data/clean, writes data/cache/option_trades_priced/date=YYYY-MM-DD/part.parquet
 (strategy-independent work is cached; CLAUDE.md). Uses latency = config sim.latency_ms.
 
-Added columns:
-    forward_usd, basis, fwd_source, fwd_index_usd, basis_age_s
-    trade_iv_ours, trade_iv_status   (from price_eth)
+Added columns (decision D018):
+  inclusive (<= t, each trade's own index): what Deribit saw at the trade instant
+    forward_usd, basis, fwd_source, basis_age_s
+    trade_iv_ours, trade_iv_status   (from price_eth; validated against Deribit's iv)
     mark_iv, mark_iv_status          (from mark_price_eth; Surface A's input in Phase 3)
+  strict (< t - latency): what a resting quote could have known
+    forward_strict_usd, index_strict_usd, trade_iv_strict
 """
 
 from __future__ import annotations
@@ -28,6 +31,13 @@ log = logging.getLogger(__name__)
 CACHE_NAME = "option_trades_priced"
 
 
+def index_series(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """One index series from every trade stream (each trade carries the index at its
+    instant), so the latest index before any t is as fresh as the data allows."""
+    s = pd.concat([f[["ts", "index_price_usd"]] for f in frames], ignore_index=True)
+    return s.dropna().sort_values("ts", kind="stable").reset_index(drop=True)
+
+
 def build_curve(cfg: Config) -> ForwardCurve:
     con = connect(cfg.data.clean_dir)
     s, e = str(cfg.study_period.start), str(cfg.study_period.end)
@@ -44,23 +54,31 @@ def build_curve(cfg: Config) -> ForwardCurve:
     ).df()
     fcfg = cfg.pricing.forwards
     log.info("index %d, futures %d, option rows for parity %d", len(index), len(fut), len(opt))
+    index = index_series([index, fut, opt])
     return ForwardCurve(index, future_basis_obs(fut), parity_basis_obs(opt, fcfg), fcfg)
 
 
 def price_trades(trades: pd.DataFrame, curve: ForwardCurve, latency_ms: int) -> pd.DataFrame:
-    fw = curve.forwards(trades["ts"], trades["expiry"], latency_ms)
     out = trades.reset_index(drop=True).copy()
-    out["forward_usd"] = fw["forward_usd"].to_numpy()
+    k, t = out["strike_usd"].to_numpy(), out["t_years"].to_numpy()
+    call = (out["option_type"] == "C").to_numpy()
+    # inclusive: what Deribit saw at the trade instant
+    fw = curve.forwards(out["ts"], out["expiry"], 0, inclusive=True, index=out["index_price_usd"])
+    f = fw["forward_usd"].to_numpy()
+    out["forward_usd"] = f
     out["basis"] = fw["basis"].to_numpy()
     out["fwd_source"] = fw["source"].to_numpy()
-    out["fwd_index_usd"] = fw["index_usd"].to_numpy()
     out["basis_age_s"] = fw["basis_age_s"].to_numpy()
-    f, k, t = out["forward_usd"], out["strike_usd"], out["t_years"]
-    call = (out["option_type"] == "C").to_numpy()
     iv, st = implied_vol(out["price_eth"].to_numpy(), f, k, t, call)
     out["trade_iv_ours"], out["trade_iv_status"] = iv, st
     iv, st = implied_vol(out["mark_price_eth"].to_numpy(), f, k, t, call)
     out["mark_iv"], out["mark_iv_status"] = iv, st
+    # strict: what a quote resting before the trade (after latency) could have known
+    fs = curve.forwards(out["ts"], out["expiry"], latency_ms)
+    out["forward_strict_usd"] = fs["forward_usd"].to_numpy()
+    out["index_strict_usd"] = fs["index_usd"].to_numpy()
+    iv, _ = implied_vol(out["price_eth"].to_numpy(), out["forward_strict_usd"], k, t, call)
+    out["trade_iv_strict"] = iv
     return out
 
 

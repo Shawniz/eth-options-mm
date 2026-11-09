@@ -67,6 +67,12 @@ pricing:
     parity_min_pairs: 3              # ... needing at least this many
     parity_max_age_s: 1800           # newest pair older than this -> missing
     basis_bounds: [0.8, 1.25]        # sanity: observations outside are discarded
+  validation:                       # Phase 2 done-when (decision D018)
+    min_days_to_expiry: 1.0          # exclude the last day before expiry
+    target_median_volpts: 0.05       # |our trade IV - Deribit trade IV|, inclusive mode
+    target_p95_volpts: 0.25
+    forward_gap_sample: 20000        # rows for the Deribit-implied-forward diagnostic
+    seed: 0
 
 sim:
   # Underlying price used for re-pricing is taken this long before each trade.
