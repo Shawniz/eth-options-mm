@@ -163,7 +163,9 @@ class SurfaceValidation(_Strict):
     rmse_targets: list[RmseTarget] = Field(min_length=1)
     normal_day_dvol_quantile: float = Field(gt=0, lt=1)
     target_arb_free_frac: float = Field(gt=0, le=1)
-    target_dvol_change_corr: float = Field(gt=-1, le=1)
+    target_dvol_daily_corr: float = Field(gt=-1, le=1)
+    dvol_spread_band: tuple[float, float]
+    target_dvol_spread_frac: float = Field(gt=0, le=1)
 
 
 class SurfaceConfig(_Strict):

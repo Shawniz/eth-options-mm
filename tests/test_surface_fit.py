@@ -34,10 +34,26 @@ def test_recovers_true_smile_without_noise(cfg):
     assert fit.rmse_volpts < 1e-3
 
 
-def test_three_strikes_are_enough_for_a_full_fit(cfg):
-    fit = fit_expiry(_marks(TRUE, np.array([-0.1, 0.0, 0.1])), prev=None, cfg=cfg.surface, t_ref=T)
+def test_four_strikes_either_side_of_forward_give_a_full_fit(cfg):
+    ks = np.array([-0.1, -0.03, 0.04, 0.1])
+    fit = fit_expiry(_marks(TRUE, ks), prev=None, cfg=cfg.surface, t_ref=T)
     assert fit.kind == "full"
     assert fit.essvi.theta == pytest.approx(TRUE.theta, rel=1e-4)
+
+
+def test_three_strikes_are_not_enough_for_a_full_fit(cfg):
+    # 3 points, 3 parameters: an exact fit with an arbitrary ATM level (D026)
+    fit = fit_expiry(_marks(TRUE, np.array([-0.1, 0.0, 0.1])), prev=None, cfg=cfg.surface, t_ref=T)
+    assert fit.kind == "none"
+
+
+def test_strikes_all_on_one_side_do_not_give_a_full_fit(cfg):
+    # many OTM calls but nothing below the forward: ATM would be extrapolated (D026)
+    prev = fit_expiry(_marks(TRUE, np.linspace(-0.3, 0.3, 9)), prev=None, cfg=cfg.surface, t_ref=T)
+    m = _marks(ESSVI(0.012, -0.3, 0.035), np.linspace(0.05, 0.4, 8))
+    fit = fit_expiry(m, prev=prev, cfg=cfg.surface, t_ref=T, prev_age_s=600)
+    assert fit.kind == "carry"
+    assert fit.essvi.theta == pytest.approx(prev.essvi.theta)
 
 
 def test_vega_weighting_downweights_wing_outlier(cfg):

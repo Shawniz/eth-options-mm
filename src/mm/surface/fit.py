@@ -1,7 +1,8 @@
 """Fit one expiry's eSSVI slice to mark IVs (decisions D021, D023).
 
 Ladder (eSSVI has 3 parameters):
-    >= min_strikes_full distinct strikes        full   (theta, rho, psi), warm-started
+    >= min_strikes_full distinct strikes, with  full   (theta, rho, psi), warm-started
+    strikes on both sides of the forward (D026)
     fewer, previous fit younger than max_carry  carry  previous slice, rescaled in time
                                                        and kept calendar-consistent
     otherwise                                   none   no smile (neighbours interpolate)
@@ -159,7 +160,9 @@ def fit_expiry(
         prev_e = prev.essvi.scaled(t_ref / prev.t_ref) if prev.t_ref != t_ref else prev.essvi
 
     note = ""
-    if n_strikes >= cfg.min_strikes_full:
+    # both sides of the forward: otherwise the ATM level is extrapolated, not fitted (D026)
+    brackets = n_obs > 0 and k.min() < 0.0 < k.max()
+    if n_strikes >= cfg.min_strikes_full and brackets:
         cold = _cold_starts(k, vol, t_ref, cfg.cold_start_tries)
         if prev_e is not None:
             e = _solve(

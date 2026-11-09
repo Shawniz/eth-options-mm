@@ -97,7 +97,8 @@ surface:                     # Surface A: SVI per expiry on Deribit mark IVs (D0
   min_mark_price_eth: 0.0002   # IV backed out of a tiny mark price is noise
   max_mark_iv: 5.0             # 500%; above this the solver sat near its bracket
   # minimum-data ladder (D021, revised for eSSVI in D023): full -> carry -> none
-  min_strikes_full: 3          # 3 eSSVI parameters need >= 3 distinct strikes
+  min_strikes_full: 4          # more strikes than the 3 eSSVI parameters, AND strikes on both
+                               # sides of the forward, else the ATM level is unidentified (D026)
   max_carry_s: 7200            # fewer strikes: carry previous fit if younger than this
   cold_start_tries: 6          # multistart for the first fit of an expiry
   retry_rmse_volpts: 2.0       # warm-started fit worse than this: retry from cold starts (D025)
@@ -118,7 +119,13 @@ surface:                     # Surface A: SVI per expiry on Deribit mark IVs (D0
   chunk_days: 7                # fixed chunks (+ warm-up), so results don't depend on n_workers
   validation:                  # Phase 3 done-when
     rmse_targets:                    # vega/recency-weighted RMSE of full fits, by expiry
-      - {min_days: 0, max_days: 10000, median: 0.3, p95: 1.0}   # PROVISIONAL (D025)
+      - {min_days: 0, max_days: 2, median: 1.25, p95: 4.0}      # set from the data (D026)
+      - {min_days: 2, max_days: 8, median: 0.75, p95: 3.0}
+      - {min_days: 8, max_days: 35, median: 0.40, p95: 2.0}
+      - {min_days: 35, max_days: 100, median: 0.30, p95: 1.5}
+      - {min_days: 100, max_days: 10000, median: 0.30, p95: 1.5}
     normal_day_dvol_quantile: 0.9    # 'normal' = |daily DVOL change| below this quantile
     target_arb_free_frac: 0.95       # share of refits with no flag on normal days
-    target_dvol_change_corr: 0.8     # hourly changes, 30d ATM vs DVOL
+    target_dvol_daily_corr: 0.6      # daily changes, 30d ATM vs DVOL (D026)
+    dvol_spread_band: [0.0, 8.0]     # DVOL - 30d ATM, vol points, hourly
+    target_dvol_spread_frac: 0.95    # share of hours inside that band
