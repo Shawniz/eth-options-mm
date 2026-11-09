@@ -77,6 +77,12 @@ def prepare_marks(priced: pd.DataFrame, cfg: SurfaceConfig) -> pd.DataFrame:
     return m.sort_values("ts", kind="stable").reset_index(drop=True)
 
 
+def recency_weights(ts_ms: np.ndarray, refit_ms: int, tau_s: float) -> np.ndarray:
+    """exp(-age / tau): within the window, recent marks dominate the level while older
+    marks still help pin the shape (decision D024)."""
+    return np.exp(-(refit_ms - np.asarray(ts_ms, dtype=float)) / (1000.0 * tau_s))
+
+
 def _row(r, exp_ms, fit: Fit, kgrid):
     e, p = fit.essvi, fit.params
     return {
@@ -152,9 +158,12 @@ def _run_chunk(args):
                     fit = Fit("full", e_scaled, t_ref, prev.n_obs, prev.n_strikes, prev.rmse_volpts)
             if fit is None:
                 age = (r - st["last_data"]) / 1000 if st["last_data"] is not None else np.inf
-                fit = fit_expiry(
-                    obs.iloc[lo:hi], prev, sc, t_ref=t_ref, prev_age_s=age, shorter=shorter
+                win_obs = obs.iloc[lo:hi]
+                win_obs = win_obs.assign(
+                    vega=win_obs["vega"].to_numpy()
+                    * recency_weights(win_obs["ts_ms"].to_numpy(), r, sc.recency_tau_s)
                 )
+                fit = fit_expiry(win_obs, prev, sc, t_ref=t_ref, prev_age_s=age, shorter=shorter)
             st["bounds"] = (lo, hi)
             if fit.kind == "full":
                 st["last_data"] = r

@@ -157,6 +157,7 @@ class SurfaceValidation(_Strict):
 class SurfaceConfig(_Strict):
     refit_interval_s: int = Field(ge=60, le=300)
     trailing_window_s: int = Field(gt=0)
+    recency_tau_s: float = Field(gt=0)
     min_fit_hours: float = Field(ge=0)
     min_mark_price_eth: float = Field(ge=0)
     max_mark_iv: float = Field(gt=0)

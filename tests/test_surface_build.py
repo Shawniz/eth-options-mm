@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from mm.pricing.black76 import price_eth
 from mm.surface.build import build_refits
@@ -67,3 +68,28 @@ def test_build_is_independent_of_worker_count(cfg):
         refit_times=times,
     )
     pd.testing.assert_frame_equal(one.fits, many.fits)
+
+
+def test_recency_weights_decay_with_age():
+    from mm.surface.build import recency_weights
+
+    r = 10_000_000
+    w = recency_weights(np.array([r - 600_000, r - 1, r - 3_000_000]), r, tau_s=600)
+    assert w[0] == pytest.approx(np.exp(-1))
+    assert w[1] == pytest.approx(1.0, abs=1e-5)
+    assert w[2] == pytest.approx(np.exp(-5))
+
+
+def test_recent_marks_dominate_the_level(cfg):
+    # Old marks (50 min ago) 5 vol points higher than recent ones at the same strikes:
+    # the fitted ATM vol should sit near the recent level.
+    base = _priced(n_min=55)
+    old = base[base["ts"] < R0 - pd.Timedelta("40min")].assign(
+        mark_iv=lambda d: d["mark_iv"] + 0.05
+    )
+    recent = base[base["ts"] >= R0 - pd.Timedelta("40min")]
+    out = build_refits(pd.concat([old, recent]), cfg, refit_times=[R0])
+    t = out.fits["t_ref"].iloc[0]
+    atm = float(np.sqrt(out.fits["theta"].iloc[0] / t))
+    atm_true = float(svi_vol(TRUE.scaled(t / 0.068), 0.0, t))
+    assert abs(atm - atm_true) < 0.01
