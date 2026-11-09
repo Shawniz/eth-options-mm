@@ -4,6 +4,7 @@
 study_period:
   start: 2025-01-01   # inclusive, UTC
   end: 2025-07-01     # exclusive, UTC (so the last day is 2025-06-30)
+  train_frac: 0.65    # first 65% of days for calibration and thresholds (CLAUDE.md)
 
 data:
   raw_dir: data/raw
@@ -113,8 +114,8 @@ surface:                     # Surface A: SVI per expiry on Deribit mark IVs (D0
   n_workers: 8                 # parallel across time chunks
   chunk_days: 7                # fixed chunks (+ warm-up), so results don't depend on n_workers
   validation:                  # Phase 3 done-when
-    target_rmse_median_volpts: 0.3   # vega-weighted RMSE of full fits
-    target_rmse_p95_volpts: 1.0
+    rmse_targets:                    # vega/recency-weighted RMSE of full fits, by expiry
+      - {min_days: 0, max_days: 10000, median: 0.3, p95: 1.0}   # PROVISIONAL (D025)
     normal_day_dvol_quantile: 0.9    # 'normal' = |daily DVOL change| below this quantile
     target_arb_free_frac: 0.95       # share of refits with no flag on normal days
     target_dvol_change_corr: 0.8     # hourly changes, 30d ATM vs DVOL

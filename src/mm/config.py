@@ -21,6 +21,12 @@ class _Strict(BaseModel):
 class StudyPeriod(_Strict):
     start: dt.date  # inclusive
     end: dt.date  # exclusive
+    train_frac: float = Field(default=0.65, gt=0, lt=1)
+
+    @property
+    def train_end(self) -> dt.date:
+        days = (self.end - self.start).days
+        return self.start + dt.timedelta(days=int(round(days * self.train_frac)))
 
     @model_validator(mode="after")
     def _ordered(self) -> StudyPeriod:
@@ -146,9 +152,15 @@ class FillConfig(_Strict):
     max_fill_fraction: float = Field(gt=0.0, le=1.0)
 
 
+class RmseTarget(_Strict):
+    min_days: float = Field(ge=0)
+    max_days: float = Field(gt=0)
+    median: float = Field(gt=0)
+    p95: float = Field(gt=0)
+
+
 class SurfaceValidation(_Strict):
-    target_rmse_median_volpts: float = Field(gt=0)
-    target_rmse_p95_volpts: float = Field(gt=0)
+    rmse_targets: list[RmseTarget] = Field(min_length=1)
     normal_day_dvol_quantile: float = Field(gt=0, lt=1)
     target_arb_free_frac: float = Field(gt=0, le=1)
     target_dvol_change_corr: float = Field(gt=-1, le=1)

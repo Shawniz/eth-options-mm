@@ -57,3 +57,10 @@ def test_cli_parses_utc_dates():
 def test_cli_rejects_reversed_dates():
     with pytest.raises(SystemExit):
         parse_args(["--config", str(BASE), "--start", "2025-01-02", "--end", "2025-01-01"])
+
+
+def test_train_end_is_65_percent_of_days():
+    cfg = load_config(BASE)
+    sp = cfg.study_period
+    frac = (sp.train_end - sp.start).days / (sp.end - sp.start).days
+    assert frac == pytest.approx(sp.train_frac, abs=0.01)
