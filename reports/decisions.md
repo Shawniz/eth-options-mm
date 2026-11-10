@@ -370,4 +370,25 @@ Each entry: the choice, the alternative, why, and the parameter's category:
   - **The stress fortnight lost 73% of equity in USD** ($159k → $35k). 3 Feb alone: options +23.6 ETH (premium + settlement + value change), perp hedge −45.9 ETH, fees −5.5 ETH. Two contributors were measured; their split is for the Phase 7 waterfall and markouts:
     1. **Smile delta left unhedged.** On the 2 Feb book, Black delta is +0.8 ETH but the sticky-moneyness bump delta is +18.3 ETH. Between refits Surface A values options at the current moneyness, so a risk-reversal book (long puts, short calls; net vega $352, gross $3,474) has spot exposure that Black delta does not see. CLAUDE.md fixes Black delta; smile-adjusted delta is an extension.
     2. **Crash flow against a stale surface.** 7,716 contracts traded on 3 Feb, half the fortnight, at a surface refitted every 5 minutes from a 60-minute window. The +7.6 ETH "edge" is measured against that same surface, so it may be adverse selection. Delta-hedged markouts will show.
+  - **Update (same day, D038):** contributor 1 was tested by hedging the smile-adjusted delta. It changed almost nothing (equity at end $34.0k vs $35.1k; perp P&L −115.7 vs −118.7 ETH). A quick delta-hedged markout check (fair at Surface A at t + h; hedge = Black delta at fill × spot change) points to contributor 2:
+    - whole fortnight: edge at fill +$40k, markout +$31k at 1 min, −$3.6k at 5 min, **−$87k at 1 h**;
+    - 3 Feb alone: +$19.6k at fill, **−$76.8k at 1 h**, about the whole day's loss.
+  - The stress loss is **adverse selection**: crash-day takers traded against a surface up to 5 minutes stale and were right. The proper markout tables (by horizon, expiry and delta bucket) are Phase 7 work.
 - **Also:** the perp traded at a discount to the index in the crash (median −10 bp at our hedges, p1 −309 bp). Hedge sizes use the index, so this shows up as hedge cost and residual delta.
+
+## D038 — Hedge the smile-adjusted (sticky-moneyness) delta
+- **Category:** from theory (owner decision, 2026-11-10)
+- **Choice:** per-option delta for hedging and account delta:
+  δᵢ = N(d1) [− 1 for puts] − φ(d1)·√T·σ′(k), with σ′(k) = w′(k)/(2σ·t_ref).
+  This is Black delta plus vega × dσ/dS under the sticky-moneyness surface of D029 (dk/dS = −1/S; the S/F factors cancel). `hedging.delta: black` keeps the old rule for comparison.
+- **Alternative:** Black delta only (CLAUDE.md's original rule, then listed as an extension).
+- **Why:**
+  - Quotes and valuation hold the smile fixed in moneyness between refits (D029), so a hedge that holds σ fixed contradicts our own model.
+  - On the 2 Feb 2025 book, Black delta was +0.8 ETH but the bump-and-revalue delta was +18.3 ETH. With the new delta, formula and bump agree exactly (−0.61 vs −0.61, real book; plus a unit test on a skewed smile).
+  - Black delta is still used to *locate* strikes (quoting universe OTM delta, 25-delta RR/BF in Phase 3).
+- **Effect:**
+  - 6–12 Jan: 1,226 hedges (was 1,015), fees 3.54 ETH (was 2.90).
+  - Stress fortnight: 3,497 hedges (was 2,868), equity at end $34.0k (was $35.1k).
+  - |Δ| stays in the band in 99.0% of the time in both runs.
+  - It is the consistent choice, not a fix for the stress loss (see the D037 update).
+- **To test in Phase 7:** whether Deribit's marks actually move closer to sticky moneyness or sticky strike from refit to refit (regress vol changes at fixed k and at fixed K on spot changes). If marks behave like sticky strike, this delta over-hedges.

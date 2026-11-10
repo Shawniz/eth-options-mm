@@ -1,8 +1,12 @@
 """Option-book delta, fast enough to evaluate at every perpetual print.
 
-delta_options = sum n_i x Black delta_i, with F_i = basis_i x S and sigma_i from the
-expiry's latest live slice at the current moneyness k = ln(K/F) (sticky moneyness between
-refits, as for quotes, D029). Per-position inputs (basis, slice) are rebuilt when the
+delta_options = sum n_i x delta_i, with F_i = basis_i x S and sigma_i from the expiry's
+latest live slice at the current moneyness k = ln(K/F) (sticky moneyness between refits,
+as for quotes and valuation, D029). The delta is consistent with that model (D038):
+    delta_i = N(d1) [- 1 for puts]  -  phi(d1) sqrt(T) sigma'(k)
+the second term being vega x dsigma/dS with dk/dS = -1/S (the S/F factors cancel), and
+sigma'(k) = w'(k) / (2 sigma t_ref), w'(k) = b (rho + (k-m)/sqrt((k-m)^2 + s^2)).
+mode="black" drops the smile term. Per-position inputs (basis, slice) are rebuilt when the
 book changes or a new refit becomes available; between rebuilds only S and T move.
 Only information before t is used: the refit is the latest at or before t (it uses marks
 before its stamp) and the basis comes from forwards strictly before t.
@@ -20,8 +24,10 @@ RAW = ("a", "b", "rho", "m", "s")
 
 
 class OptionDelta:
-    def __init__(self, book, curve, meta):
-        self.book, self.curve, self.meta = book, curve, meta
+    def __init__(self, book, curve, meta, mode: str = "smile"):
+        if mode not in ("smile", "black"):
+            raise ValueError(f"unknown delta mode {mode!r}")
+        self.book, self.curve, self.meta, self.mode = book, curve, meta, mode
         self.dirty = True
         self.refit = None
         self.n_missing = 0  # positions with no slice/forward at the last rebuild
@@ -65,11 +71,17 @@ class OptionDelta:
         f = self._basis * s_usd
         lk = np.log(self._k / f)
         x = lk - self._m
-        w = self._a + self._b * (self._rho * x + np.sqrt(x * x + self._s * self._s))
+        r = np.sqrt(x * x + self._s * self._s)
+        w = self._a + self._b * (self._rho * x + r)
         sig = np.sqrt(np.maximum(w, 0.0) / self._tref)
         t = (self._exp - ts_ms) / MS_PER_YEAR
-        sd = sig * np.sqrt(np.maximum(t, 1e-12))
-        d = ndtr((-lk + 0.5 * sd * sd) / sd) - self._put
+        rt = np.sqrt(np.maximum(t, 1e-12))
+        sd = sig * rt
+        d1 = (-lk + 0.5 * sd * sd) / sd
+        d = ndtr(d1) - self._put
+        if self.mode == "smile":
+            dsig_dk = self._b * (self._rho + x / r) / (2.0 * sig * self._tref)
+            d = d - np.exp(-0.5 * d1 * d1) / np.sqrt(2.0 * np.pi) * rt * dsig_dk
         return float(np.dot(self._n, d))
 
 

@@ -163,7 +163,7 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
     acct = Account(sc.initial_eth)
     qbook = QuoteBook(sc.latency_ms)
     meta = _Meta()
-    odelta = OptionDelta(inp.book, inp.curve, meta)
+    odelta = OptionDelta(inp.book, inp.curve, meta, cfg.hedging.delta)
     skips: Counter = Counter()
     lim: Counter = Counter()
     fills, daily, hedges, quotes = [], [], [], []

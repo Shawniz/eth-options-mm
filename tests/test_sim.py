@@ -165,8 +165,8 @@ def _with_quoting(cfg, **upd):
     return cfg.model_copy(update={"quoting": cfg.quoting.model_copy(update=upd)})
 
 
-def _market(cfg, vol=VOL, extra_refit_skip=()):
-    """Flat 60% smile, forward = index = 3000, refits every 5 min."""
+def _market(cfg, vol=VOL, extra_refit_skip=(), b=0.0, rho=0.0):
+    """60% ATM smile (flat unless b > 0), forward = index = 3000, refits every 5 min."""
     step = cfg.surface.refit_interval_s
     grid = pd.date_range(START, END, freq=f"{step}s")
     t_ref = (EXP - grid).total_seconds() / (365 * 86400)
@@ -177,9 +177,9 @@ def _market(cfg, vol=VOL, extra_refit_skip=()):
             "expiry": EXP,
             "t_ref": t_ref[live],
             "kind": "full",
-            "a": vol**2 * t_ref[live],
-            "b": 0.0,
-            "rho": 0.0,
+            "a": vol**2 * t_ref[live] - b * 0.1,  # w(0) = vol^2 t_ref (m = 0, s = 0.1)
+            "b": b,
+            "rho": rho,
             "m": 0.0,
             "s": 0.1,
         }
@@ -478,3 +478,51 @@ def test_book_delta_matches_bump_and_revalue_on_a_flat_smile(cfg):
     bump = (w(s + 0.5) - w(s - 0.5)) / 1.0
     assert acct.eth + od.total(acct, ts, s) == pytest.approx(bump, rel=1e-6)
     assert od.n_missing == 0
+
+
+@pytest.mark.parametrize("mode", ["smile", "black"])
+def test_book_delta_matches_its_own_bump_on_a_skewed_smile(cfg, mode):
+    # smile delta = bump with the smile read at the new moneyness (sticky moneyness, D038);
+    # black delta = bump with each option's vol frozen
+    from mm.pricing.black76 import price_eth
+    from mm.pricing.time import MS_PER_YEAR
+    from mm.sim.delta import OptionDelta, option_value_eth
+    from mm.sim.engine import _Meta
+
+    book, curve = _market(cfg, b=0.004, rho=-0.6)  # steep put skew
+    acct = Account(3.0)
+    acct.option_fill(0, "ETH-10JAN25-2700-P", "buy", 9.0, 0.02, 0.0)
+    acct.option_fill(0, "ETH-10JAN25-3300-C", "sell", 6.0, 0.02, 0.0)
+    ts, s = _ms1("2025-01-07 12:00"), 3050.0
+    od = OptionDelta(book, curve, _Meta(), mode)
+    d = acct.eth + od.total(acct, ts, s)
+    if mode == "smile":
+
+        def w(x):
+            return x * (acct.eth + option_value_eth(od, acct, ts, x))
+    else:
+        f0 = od._basis * s
+        xx = np.log(od._k / f0) - od._m
+        sig0 = np.sqrt((od._a + od._b * (od._rho * xx + np.sqrt(xx * xx + od._s**2))) / od._tref)
+        t = (od._exp - ts) / MS_PER_YEAR
+
+        def w(x):
+            return x * (acct.eth + float(np.dot(od._n, price_eth(od._basis * x, od._k, t, sig0,
+                                                                  ~od._put))))  # fmt: skip
+
+    assert d == pytest.approx((w(s + 0.05) - w(s - 0.05)) / 0.1, rel=1e-5)
+
+
+def test_smile_term_makes_a_risk_reversal_longer_delta(cfg):
+    # long put wing + short call wing on a put-skewed smile: smile delta > black delta
+    from mm.sim.delta import OptionDelta
+    from mm.sim.engine import _Meta
+
+    book, curve = _market(cfg, b=0.004, rho=-0.6)
+    acct = Account(0.0)
+    acct.option_fill(0, "ETH-10JAN25-2700-P", "buy", 9.0, 0.02, 0.0)
+    acct.option_fill(0, "ETH-10JAN25-3300-C", "sell", 6.0, 0.02, 0.0)
+    ts = _ms1("2025-01-07 12:00")
+    smile = OptionDelta(book, curve, _Meta(), "smile").total(acct, ts, 3050.0)
+    black = OptionDelta(book, curve, _Meta(), "black").total(acct, ts, 3050.0)
+    assert smile > black
