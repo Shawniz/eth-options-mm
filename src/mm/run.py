@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> Config:
     res = run(inp, cfg)
     run_dir = Path(cfg.sim.run_dir) / label
     save(res, run_dir)
-    summary = write_report(cfg, inp, res, label, Path(f"reports/phase4_sim_{label}.md"))
+    summary = write_report(cfg, inp, res, label, Path(f"reports/sim_{label}.md"))
     write_summary(summary, run_dir)
     print(
         f"fills {summary['fills']:,}, share {summary['share_of_contracts'] * 100:.2f}%, "

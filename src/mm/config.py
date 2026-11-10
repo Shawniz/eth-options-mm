@@ -152,15 +152,29 @@ class SimConfig(_Strict):
     run_dir: Path
 
 
-class FixedQuoteConfig(_Strict):
-    half_spread_volpts: float = Field(gt=0)
-    size_contracts: float = Field(gt=0)
-    min_days: float = Field(ge=0)
+class UniverseConfig(_Strict):
+    min_days: float = Field(ge=0)  # stop quoting an expiry below this (D030)
     max_days: float = Field(gt=0)
+    min_abs_delta: float = Field(ge=0, lt=0.5)  # OTM delta: min(|call delta|, |put delta|)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> UniverseConfig:
+        if self.max_days <= self.min_days:
+            raise ValueError("universe.max_days must exceed min_days")
+        return self
 
 
 class QuotingConfig(_Strict):
-    fixed: FixedQuoteConfig
+    half_spread_volpts: float = Field(ge=0)
+    min_half_width_ticks: float = Field(ge=0)
+    fee_cover: float = Field(ge=0)
+    kappa_volpts: float = Field(ge=0)
+    vega_ref_usd: float = Field(gt=0)
+    sizing: Literal["vega", "fixed"]
+    target_vega_usd: float = Field(gt=0)
+    max_contracts: float = Field(gt=0)
+    fixed_contracts: float = Field(gt=0)
+    universe: UniverseConfig
 
 
 class FillConfig(_Strict):

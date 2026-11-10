@@ -9,9 +9,14 @@ For N random fills (seeded) it recomputes, with its own queries and formulas:
                  cutoff x index. Expiries without one (interpolated basis) use the run's
                  forward, which Phase 2 validated; the table says which.
   fair vol       raw SVI w(k) of that refit's slice: sqrt(w / t_ref)
-  quotes         Black-76 with scipy.stats.norm, +- half-spread, own tick rounding
+  universe       tenor and OTM delta min(N(d1), 1 - N(d1)) at fair vol
+  quotes         Black-76 with scipy.stats.norm: skew -kappa x net_vega / vega_ref capped
+                 at h, +- h around the centre, price floor max(ticks, fee), own rounding.
+                 net_vega is taken from the fill log (it depends on the whole book's
+                 history); everything downstream of it is recomputed.
+  size           vega: floor(min(target / (Black vega x S/F), max)); fixed: fixed_contracts
   fill           strict rule, size min(trade, quote) x fraction, maker fee with cap
-Writes reports/phase4_handcheck.md.
+Writes reports/phase5_handcheck.md (--out).
 """
 
 from __future__ import annotations
@@ -61,7 +66,7 @@ def check(cfg, run: str, n: int, seed: int) -> pd.DataFrame:
                          .astype("datetime64[ms, UTC]").astype("int64").to_numpy())  # fmt: skip
     fits = pd.read_parquet(CACHE / "fits.parquet")
     con = connect(cfg.data.clean_dir)
-    spec, qc, fc = cfg.specs.option, cfg.quoting.fixed, cfg.fill
+    spec, qc, fc = cfg.specs.option, cfg.quoting, cfg.fill
     lat = cfg.sim.latency_ms
     rows = []
     for r in pick.itertuples():
@@ -99,25 +104,44 @@ def check(cfg, run: str, n: int, seed: int) -> pd.DataFrame:
         sig = math.sqrt(w / sl.t_ref)
         t = (exp_ms - r.ts_ms) / (365 * 86_400_000)
         call = r.instrument_name.endswith("-C")
+        sd = sig * math.sqrt(t)
+        d1 = (math.log(fwd / r.strike_usd) + 0.5 * sd * sd) / sd
+        otm = min(norm.cdf(d1), 1 - norm.cdf(d1))
+        u = qc.universe
+        in_univ = u.min_days <= t * 365 <= u.max_days and otm >= u.min_abs_delta
+        vega_i = fwd * norm.pdf(d1) * math.sqrt(t) / 100 * idx / fwd
+        raw_size = (qc.fixed_contracts if qc.sizing == "fixed"
+                    else min(qc.target_vega_usd / vega_i, qc.max_contracts))  # fmt: skip
+        inc = spec.min_order_contracts
+        size = math.floor(raw_size / inc + 1e-9) * inc
         h = qc.half_spread_volpts / 100
-        pb, pa = (
-            _black_eth(fwd, r.strike_usd, t, sig - h, call),
-            _black_eth(fwd, r.strike_usd, t, sig + h, call),
-        )
+        skew = -qc.kappa_volpts * r.net_vega_usd / qc.vega_ref_usd / 100
+        skew = max(-h, min(h, skew))
+        sc = sig + skew
+        pc = _black_eth(fwd, r.strike_usd, t, sc, call)
+        fee_c = min(spec.maker_fee_eth_per_contract, spec.fee_cap_fraction_of_premium * pc)
+        half_min = max(qc.min_half_width_ticks * _tick(pc, spec.tick_steps), qc.fee_cover * fee_c)
+        pb = min(_black_eth(fwd, r.strike_usd, t, sc - h, call), pc - half_min)
+        pa = max(_black_eth(fwd, r.strike_usd, t, sc + h, call), pc + half_min)
         tb, ta = _tick(pb, spec.tick_steps), _tick(pa, spec.tick_steps)
         bid = round(math.floor(pb / tb + 1e-9) * tb, 10)
         ask = round(math.ceil(pa / ta - 1e-9) * ta, 10)
+        if ask - bid < _tick(bid, spec.tick_steps) - 1e-9:
+            ask = round(bid + _tick(bid, spec.tick_steps), 10)
         if r.direction == "sell":
             crosses, our_px = bid > r.price_eth + 1e-12, bid
         else:
             crosses, our_px = ask < r.price_eth - 1e-12, ask
-        qty = min(r.amount_contracts, qc.size_contracts) * fc.max_fill_fraction
+        qty = min(r.amount_contracts, size) * fc.max_fill_fraction
         fee = qty * min(spec.maker_fee_eth_per_contract, spec.fee_cap_fraction_of_premium * our_px)
-        sweep = abs(r.eligible - min(r.amount_contracts, qc.size_contracts)) > 1e-9
+        sweep = abs(r.eligible - min(r.amount_contracts, size)) > 1e-9
         ok = (
             refit == r.refit_ms
             and abs(idx - r.index_q) < 1e-9
             and abs(fwd - r.forward_q) < 1e-6 * fwd
+            and in_univ
+            and abs(size - r.quote_size) < 1e-9
+            and abs(sc - r.sigma_center) < 1e-9
             and crosses
             and abs(our_px - r.fill_price) < 1e-12
             and (sweep or abs(qty - r.qty) < 1e-12)
@@ -132,6 +156,10 @@ def check(cfg, run: str, n: int, seed: int) -> pd.DataFrame:
                 "size": r.amount_contracts,
                 "fwd source": src,
                 "fair vol": sig,
+                "otm delta": otm,
+                "net vega $": r.net_vega_usd,
+                "skew (vp)": skew * 100,
+                "size (check/sim)": f"{size:g}/{r.quote_size:g}",
                 "bid (check)": bid,
                 "ask (check)": ask,
                 "bid (sim)": r.bid,
@@ -153,6 +181,7 @@ def main(argv=None):
     p.add_argument("--run", required=True)
     p.add_argument("--n", type=int, default=20)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--out", default="reports/phase5_handcheck.md")
     a = p.parse_args(argv)
     cfg = load_config(a.config)
     df = check(cfg, a.run, a.n, a.seed)
@@ -162,7 +191,7 @@ def main(argv=None):
         cells = [f"{v:.5f}" if isinstance(v, float) else str(v) for v in r.tolist()]
         lines.append("| " + " | ".join(cells) + " |")
     n_ok = int((df["ok"] == "✅").sum())
-    md = f"""# Phase 4: hand-checked fills ({a.run})
+    md = f"""# Hand-checked fills ({a.run})
 
 Generated by `uv run python -m mm.sim.handcheck --config {a.config} --run {a.run}`.
 {len(df)} fills sampled at random (seed {a.seed}) and recomputed from the raw tables with
@@ -172,8 +201,9 @@ so less of our quote was left (size checked against the sweep rule instead).
 
 {chr(10).join(lines)}
 """
-    Path("reports/phase4_handcheck.md").write_text(md)
-    print(f"{n_ok}/{len(df)} fills match -> reports/phase4_handcheck.md")
+    out = Path(a.out)
+    out.write_text(md)
+    print(f"{n_ok}/{len(df)} fills match -> {out}")
 
 
 if __name__ == "__main__":

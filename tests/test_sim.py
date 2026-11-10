@@ -1,14 +1,11 @@
-import math
-
 import numpy as np
 import pandas as pd
 import pytest
-from hypothesis import given, settings
-from hypothesis import strategies as st
 
 from mm.config import load_config
-from mm.pricing.black76 import price_eth
+from mm.pricing.black76 import price_eth, vega
 from mm.pricing.forwards import ForwardCurve, future_basis_obs
+from mm.quoting.quoter import make_quote
 from mm.sim.account import Account, InvariantError
 from mm.sim.engine import SimInputs, find_pauses, run
 from mm.sim.fair import SurfaceBook, _ms, fair_values
@@ -20,7 +17,6 @@ from mm.sim.fees import (
     payoff_eth,
 )
 from mm.sim.fills import ASK_BELOW, BID_ABOVE, QuoteBook, cross, decide
-from mm.sim.quotes import fixed_quote, round_ask, round_bid
 
 START = pd.Timestamp("2025-01-06 00:00", tz="UTC")
 END = pd.Timestamp("2025-01-11 00:00", tz="UTC")
@@ -67,53 +63,6 @@ def test_funding_sign_long_pays_positive_rate():
     assert funding_eth(30_000, 0.0001, 3000) == pytest.approx(-0.001)
     assert funding_eth(-30_000, 0.0001, 3000) == pytest.approx(0.001)
     assert funding_eth(30_000, -0.0001, 3000) == pytest.approx(0.001)
-
-
-# ---------------- quotes ----------------
-
-
-def test_rounding_bid_down_ask_up_with_price_dependent_tick(opt):
-    assert round_bid(0.00347, opt) == pytest.approx(0.0034)
-    assert round_ask(0.00341, opt) == pytest.approx(0.0035)
-    assert round_bid(0.0123, opt) == pytest.approx(0.0120)  # 0.0005 tick above 0.005
-    assert round_ask(0.0121, opt) == pytest.approx(0.0125)
-    assert round_bid(0.0120, opt) == pytest.approx(0.0120)  # already on the grid
-
-
-def test_wider_half_spread_moves_both_quotes_out(cfg, opt):
-    q1 = fixed_quote(VOL, S, 3000, 0.05, True, cfg.quoting.fixed, opt)
-    wide = cfg.quoting.fixed.model_copy(update={"half_spread_volpts": 5.0})
-    q2 = fixed_quote(VOL, S, 3000, 0.05, True, wide, opt)
-    assert q2.bid < q1.bid and q2.ask > q1.ask
-
-
-def test_no_bid_when_vol_minus_half_spread_is_not_positive(cfg, opt):
-    q = fixed_quote(0.01, S, 3000, 0.05, True, cfg.quoting.fixed, opt)
-    assert q.bid is None and q.ask > 0
-
-
-@settings(max_examples=300, deadline=None)
-@given(
-    sigma=st.floats(0.05, 3.0),
-    moneyness=st.floats(-0.8, 0.8),
-    days=st.floats(0.5, 120),
-    call=st.booleans(),
-    h=st.floats(0.1, 10),
-)
-def test_quote_properties(sigma, moneyness, days, call, h):
-    cfg = BASE_CFG
-    opt = cfg.specs.option
-    qc = cfg.quoting.fixed.model_copy(update={"half_spread_volpts": h})
-    q = fixed_quote(sigma, S, S * math.exp(moneyness), days / 365, call, qc, opt)
-    assert q.ask > 0
-    for p in (q.ask, q.bid):
-        if p is not None:
-            tick = opt.tick_for(p - 1e-12)
-            assert abs(p / tick - round(p / tick)) < 1e-6  # on the tick grid
-    if q.bid is not None:
-        assert 0 < q.bid < q.ask
-        fair = float(price_eth(S, S * math.exp(moneyness), days / 365, sigma, call))
-        assert q.bid <= fair + 1e-12 <= q.ask + 2e-12
 
 
 # ---------------- fills ----------------
@@ -199,6 +148,19 @@ def test_option_fill_signs():
 
 def _ms1(ts) -> int:
     return int(pd.Timestamp(ts).value // 10**6)
+
+
+def _t(ts) -> float:
+    return (EXP - pd.Timestamp(ts, tz="UTC")).total_seconds() / (365 * 86400)
+
+
+def _quote(cfg, ts, nv=0.0):
+    """The quote the engine should post on INST at ts, given net book vega nv."""
+    return make_quote(VOL, S, 3000.0, _t(ts), True, nv, cfg.quoting, cfg.specs.option, S)
+
+
+def _with_quoting(cfg, **upd):
+    return cfg.model_copy(update={"quoting": cfg.quoting.model_copy(update=upd)})
 
 
 def _market(cfg, vol=VOL, extra_refit_skip=()):
@@ -294,15 +256,11 @@ def test_latency_moves_the_refit_back(cfg):
 
 
 def test_synthetic_run_known_outcome(cfg):
+    cfg = _with_quoting(cfg, kappa_volpts=0.0)  # skew has its own tests below
     book, curve = _market(cfg)
-    t1, t2, t3 = "2025-01-06 12:00:30", "2025-01-07 12:00:30", "2025-01-08 12:00:30"
-    qc, opt = cfg.quoting.fixed, cfg.specs.option
-
-    def q(ts):
-        t = (EXP - pd.Timestamp(ts, tz="UTC")).total_seconds() / (365 * 86400)
-        return fixed_quote(VOL, S, 3000.0, t, True, qc, opt)
-
-    bid1, ask2, bid3 = q(t1).bid, q(t2).ask, q(t3).bid
+    # t3 is 2.6 days before expiry, inside the 2-day universe cut-off
+    t1, t2, t3 = "2025-01-06 12:00:30", "2025-01-07 12:00:30", "2025-01-07 18:00:30"
+    bid1, ask2, bid3 = _quote(cfg, t1).bid, _quote(cfg, t2).ask, _quote(cfg, t3).bid
     trades = _trades(
         [
             (t1, "sell", bid1 - 0.002, 4),  # below our bid: we buy 0.5 x 4 = 2
@@ -340,8 +298,7 @@ def test_pause_blocks_quotes_until_next_refit(cfg):
 def test_short_position_settles_with_negative_payoff(cfg):
     book, curve = _market(cfg)
     ts = "2025-01-06 12:00:30"
-    t = (EXP - pd.Timestamp(ts, tz="UTC")).total_seconds() / (365 * 86400)
-    ask = fixed_quote(VOL, S, 3000.0, t, True, cfg.quoting.fixed, cfg.specs.option).ask
+    ask = _quote(cfg, ts).ask
     res = run(_inputs(cfg, _trades([(ts, "buy", ask + 0.01, 4)]), book, curve), cfg)
     settle = res.ledger.query("kind == 'settlement'")["eth"].sum()
     assert settle == pytest.approx(-2 * 300 / 3300)
@@ -351,10 +308,51 @@ def test_short_position_settles_with_negative_payoff(cfg):
 def test_daily_snapshots_value_open_options_at_surface_a(cfg):
     book, curve = _market(cfg)
     ts = "2025-01-06 12:00:30"
-    t = (EXP - pd.Timestamp(ts, tz="UTC")).total_seconds() / (365 * 86400)
-    bid = fixed_quote(VOL, S, 3000.0, t, True, cfg.quoting.fixed, cfg.specs.option).bid
+    bid = _quote(cfg, ts).bid
     res = run(_inputs(cfg, _trades([(ts, "sell", bid - 0.002, 4)]), book, curve), cfg)
     d = res.daily.set_index("ts_ms").iloc[0]  # 2025-01-07 00:00
     t_snap = (EXP - pd.Timestamp("2025-01-07", tz="UTC")).total_seconds() / (365 * 86400)
     assert d["options_eth"] == pytest.approx(2 * price_eth(S, 3000.0, t_snap, VOL, True))
     assert d["equity_usd"] == pytest.approx(S * (d["eth_balance"] + d["options_eth"]))
+
+
+# ---------------- Phase 5: universe, net vega, skew in the loop ----------------
+
+
+def test_universe_cutoffs_skip_trades(cfg):
+    book, curve = _market(cfg)
+    tr = _trades([("2025-01-08 12:00:30", "sell", 0.0001, 4)])  # 1.8 days: below 2
+    res = run(_inputs(cfg, tr, book, curve), cfg)
+    assert res.skips["tenor"] == 1 and res.fills.empty
+    far = _trades([("2025-01-06 12:00:30", "sell", 0.0001, 4)]).assign(
+        instrument_name="ETH-10JAN25-4500-C", strike_usd=4500.0
+    )  # ~0 delta at 60% vol, 4 days
+    res = run(_inputs(cfg, far, book, curve), cfg)
+    assert res.skips["low_delta"] == 1 and res.fills.empty
+
+
+def test_net_vega_tracks_fills_and_is_recomputed_at_refits(cfg):
+    book, curve = _market(cfg)
+    t1, t2, t3 = "2025-01-06 12:00:30", "2025-01-06 12:01:30", "2025-01-06 12:10:30"
+    tr = _trades([(t1, "sell", 0.0001, 4), (t2, "buy", 0.5, 2), (t3, "buy", 0.5, 2)])
+    inp = _inputs(cfg, tr, book, curve)
+    f = run(inp, cfg).fills
+    assert list(f["our_side"]) == ["buy", "sell", "sell"]
+    assert f["net_vega_usd"].iloc[0] == 0.0
+    v1 = inp.trades["vega_usd"].iloc[0]
+    assert f["net_vega_usd"].iloc[1] == pytest.approx(2 * v1)  # same refit: + fill vega
+    t_refit = _t("2025-01-06 12:10:00")
+    assert f["net_vega_usd"].iloc[2] == pytest.approx(1 * vega(S, 3000.0, t_refit, VOL))
+
+
+def test_long_vega_book_lowers_both_quotes(cfg):
+    book, curve = _market(cfg)
+    t1, t2 = "2025-01-06 12:00:30", "2025-01-06 12:01:30"
+    tr = _trades([(t1, "sell", 0.0001, 4), (t2, "buy", 0.5, 2)])
+    flat = run(_inputs(cfg, tr, book, curve), _with_quoting(cfg, kappa_volpts=0.0)).fills
+    skc = _with_quoting(cfg, kappa_volpts=1.0, vega_ref_usd=1.0)
+    sk = run(_inputs(cfg, tr, book, curve), skc).fills
+    assert sk["ask"].iloc[1] < flat["ask"].iloc[1] and sk["bid"].iloc[1] < flat["bid"].iloc[1]
+    assert sk["skew_capped"].iloc[1] and sk["skew_volpts"].iloc[1] == pytest.approx(-1.0)
+    expected = _quote(skc, t2, nv=sk["net_vega_usd"].iloc[1])
+    assert sk["ask"].iloc[1] == pytest.approx(expected.ask)

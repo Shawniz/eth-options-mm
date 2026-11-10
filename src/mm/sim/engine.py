@@ -20,11 +20,12 @@ from mm.data.instruments import parse_instrument
 from mm.pricing.black76 import price_eth
 from mm.pricing.forwards import ForwardCurve
 from mm.pricing.time import MS_PER_YEAR
+from mm.quoting.quoter import in_universe, make_quote
+from mm.risk.greeks import book_vega_usd
 from mm.sim.account import Account
 from mm.sim.fair import SurfaceBook, svi_total_variance
 from mm.sim.fees import delivery_fee_eth, funding_eth, is_daily_expiry, option_fee_eth, payoff_eth
 from mm.sim.fills import QuoteBook, decide
-from mm.sim.quotes import fixed_quote
 
 DAY_MS = 86_400_000
 
@@ -115,8 +116,32 @@ def _value(acct: Account, ts_ms: int, inp: SimInputs, meta: _Meta) -> dict:
     }
 
 
+def _book_vega(acct: Account, refit_ms: int, inp: SimInputs, meta: _Meta) -> float:
+    """Net vega (USD per vol point) of the option book at refit R, from information
+    before R only: each expiry's latest live slice at or before R, forwards strictly < R."""
+    names = [n for n, q in acct.positions.items() if q]
+    if not names:
+        return 0.0
+    m = [meta(n) for n in names]
+    exp = np.array([x[0] for x in m], "int64")
+    k = np.array([x[1] for x in m])
+    ts = pd.Series(pd.to_datetime(np.full(len(names), refit_ms), unit="ms", utc=True))
+    fw = inp.curve.forwards(ts, pd.Series(pd.to_datetime(exp, unit="ms", utc=True)), 0)
+    f, s = fw["forward_usd"].to_numpy(), fw["index_usd"].to_numpy()
+    sig = np.full(len(names), np.nan)
+    for i, e in enumerate(exp):
+        sl = inp.book.slice_at_or_before(int(e), refit_ms)
+        if sl is not None and np.isfinite(f[i]):
+            w = svi_total_variance(*(sl[c] for c in ("a", "b", "rho", "m", "s")),
+                                   np.log(k[i] / f[i]))  # fmt: skip
+            sig[i] = np.sqrt(max(w, 0.0) / sl["t_ref"])
+    t = (exp - refit_ms) / MS_PER_YEAR
+    n = np.array([acct.positions[x] for x in names])
+    return book_vega_usd(n, f, k, t, sig, s)
+
+
 def run(inp: SimInputs, cfg: Config) -> SimResult:
-    spec, qcfg, fcfg, sc = cfg.specs.option, cfg.quoting.fixed, cfg.fill, cfg.sim
+    spec, qcfg, fcfg, sc = cfg.specs.option, cfg.quoting, cfg.fill, cfg.sim
     acct = Account(sc.initial_eth)
     qbook = QuoteBook(sc.latency_ms)
     meta = _Meta()
@@ -143,6 +168,7 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
         ev.append((inp.end_ms, 1, "snapshot", None))
     ev.sort(key=lambda x: (x[0], x[1]))
     pos = 0
+    vega_state = {"refit": None, "net": 0.0}  # net book vega, recomputed at each refit
 
     def handle(e):
         ts, _, kind, payload = e
@@ -159,6 +185,7 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
                     ts, "delivery_fee", -delivery_fee_eth(n, pay, spec, is_daily_expiry(ts)), name
                 )
                 acct.move(ts, "expiry", name, -n)
+            vega_state["refit"] = None  # positions gone: recompute at the next trade
         elif kind == "funding":
             rate, index = payload
             if acct.perp_usd:
@@ -171,15 +198,16 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
         "ts_ms", "trade_id", "trade_seq", "instrument_name", "direction", "price_eth",
         "amount_contracts", "exp_ms", "strike_usd", "option_type", "t_years", "fit_kind",
         "refit_ms", "forward_q", "index_q", "sigma_fair", "fair_eth", "is_suspect",
-        "is_liquidation",
+        "is_liquidation", "otm_delta", "vega_usd",
     ]  # fmt: skip
     for i, row in enumerate(tr[cols].itertuples(index=False)):
         while pos < len(ev) and ev[pos][0] <= row.ts_ms:
             handle(ev[pos])
             pos += 1
         days = row.t_years * 365
-        if not (qcfg.min_days <= days <= qcfg.max_days):
-            skips["outside_universe"] += 1
+        u = qcfg.universe
+        if not (u.min_days <= days <= u.max_days):
+            skips["tenor"] += 1
             continue
         if blocked[i]:
             skips["paused"] += 1
@@ -190,9 +218,18 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
         if not np.isfinite(row.forward_q) or not np.isfinite(row.sigma_fair):
             skips["no_forward"] += 1
             continue
+        if not in_universe(row.otm_delta, days, u):
+            skips["low_delta"] += 1
+            continue
+        if vega_state["refit"] != row.refit_ms:
+            vega_state["refit"] = row.refit_ms
+            vega_state["net"] = _book_vega(acct, int(row.refit_ms), inp, meta)
         call = row.option_type == "C"
-        q = fixed_quote(row.sigma_fair, row.forward_q, row.strike_usd, row.t_years, call,
-                        qcfg, spec)  # fmt: skip
+        q = make_quote(row.sigma_fair, row.forward_q, row.strike_usd, row.t_years, call,
+                       vega_state["net"], qcfg, spec, row.index_q)  # fmt: skip
+        if q is None:
+            skips["no_size"] += 1
+            continue
         rng = (
             np.random.default_rng([sc.seed, int(row.trade_seq)])
             if sc.fill_sizing == "random"
@@ -206,18 +243,26 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
         fee = option_fee_eth(d.qty, d.price, spec, maker=True)
         acct.option_fill(row.ts_ms, row.instrument_name, d.our_side, d.qty, d.price, fee)
         acct.check()
+        signed = d.qty if d.our_side == "buy" else -d.qty
+        net_before = vega_state["net"]
+        vega_state["net"] += signed * row.vega_usd
         fills.append(
             {
                 **row._asdict(),
                 "bid": q.bid,
                 "ask": q.ask,
                 "quote_size": q.size,
+                "sigma_center": q.sigma_center,
+                "skew_volpts": q.skew_volpts,
+                "skew_capped": q.skew_capped,
+                "floor_bound": q.floor_bound,
+                "net_vega_usd": net_before,
                 "our_side": d.our_side,
                 "fill_price": d.price,
                 "eligible": d.eligible,
                 "qty": d.qty,
                 "fee_eth": fee,
-                "edge_eth": (d.qty if d.our_side == "buy" else -d.qty) * (row.fair_eth - d.price),
+                "edge_eth": signed * (row.fair_eth - d.price),
                 "reason": d.reason,
             }
         )
