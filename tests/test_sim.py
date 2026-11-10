@@ -165,8 +165,16 @@ def _with_quoting(cfg, **upd):
     return cfg.model_copy(update={"quoting": cfg.quoting.model_copy(update=upd)})
 
 
-def _market(cfg, vol=VOL, extra_refit_skip=(), b=0.0, rho=0.0):
-    """60% ATM smile (flat unless b > 0), forward = index = 3000, refits every 5 min."""
+def _vols(grid, vol, vol_after):
+    v = np.full(len(grid), vol)
+    if vol_after is not None:
+        v[grid >= pd.Timestamp(vol_after[0], tz="UTC")] = vol_after[1]
+    return v
+
+
+def _market(cfg, vol=VOL, extra_refit_skip=(), b=0.0, rho=0.0, vol_after=None):
+    """60% ATM smile (flat unless b > 0), forward = index = 3000, refits every 5 min.
+    vol_after=(ts, vol): refits at or after ts use that ATM vol instead."""
     step = cfg.surface.refit_interval_s
     grid = pd.date_range(START, END, freq=f"{step}s")
     t_ref = (EXP - grid).total_seconds() / (365 * 86400)
@@ -177,7 +185,7 @@ def _market(cfg, vol=VOL, extra_refit_skip=(), b=0.0, rho=0.0):
             "expiry": EXP,
             "t_ref": t_ref[live],
             "kind": "full",
-            "a": vol**2 * t_ref[live] - b * 0.1,  # w(0) = vol^2 t_ref (m = 0, s = 0.1)
+            "a": _vols(grid[live], vol, vol_after) ** 2 * t_ref[live] - b * 0.1,  # w(0)
             "b": b,
             "rho": rho,
             "m": 0.0,
@@ -526,3 +534,17 @@ def test_smile_term_makes_a_risk_reversal_longer_delta(cfg):
     smile = OptionDelta(book, curve, _Meta(), "smile").total(acct, ts, 3050.0)
     black = OptionDelta(book, curve, _Meta(), "black").total(acct, ts, 3050.0)
     assert smile > black
+
+
+def test_latency_rule_holds_for_every_fill_and_hedge(cfg):
+    # with 5 s latency: quotes use refits <= trade - 5 s; hedges execute >= decision + 5 s
+    c = _with(cfg, "sim", latency_ms=5000)
+    book, curve = _market(c)
+    sells = [(f"2025-01-06 12:0{m}:30", "buy", 0.5, 100) for m in range(4)]
+    t0 = pd.Timestamp("2025-01-06 11:59", tz="UTC")
+    rows = [(t0 + pd.Timedelta(seconds=2 * i), "buy" if i % 2 else "sell", 3000.0 - 0.2 * i)
+            for i in range(3000)]  # fmt: skip
+    res = run(_inputs(c, _trades(sells), book, curve, perp=_perp(rows)), c)
+    assert len(res.fills) == 4 and len(res.hedges) > 3
+    assert (res.fills["refit_ms"] <= res.fills["ts_ms"] - 5000).all()
+    assert (res.hedges["exec_ms"] >= res.hedges["decide_ms"] + 5000).all()

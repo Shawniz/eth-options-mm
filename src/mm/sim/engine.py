@@ -95,27 +95,27 @@ class _Meta:
 
 def _value(acct: Account, ts_ms: int, inp: SimInputs, meta: _Meta, mark, delta) -> dict:
     """Account value at Surface A (CLAUDE.md 13): W = S (B + sum n_i C_i/F_i + perp),
-    perp = Q (1/P0 - 1/mark) at the latest perp mark."""
+    perp = Q (1/P0 - 1/mark) at the latest perp mark. Valuation is measurement, so it uses
+    information up to and including ts (D039)."""
     r = int(inp.book.latest_refit(np.array([ts_ms]))[0])
     opt_eth, missing = 0.0, 0
-    index = np.nan
+    index = inp.curve.index_at(ts_ms, inclusive=True)
     for name, n in acct.positions.items():
         exp, k, call = meta(name)
-        fw = inp.curve.forward(
-            pd.Timestamp(exp, unit="ms", tz="UTC"), pd.Timestamp(ts_ms, unit="ms", tz="UTC"), 0
-        )
-        index = fw.index_usd
+        fw = inp.curve.forwards(
+            pd.Series([pd.Timestamp(ts_ms, unit="ms", tz="UTC")]),
+            pd.Series([pd.Timestamp(exp, unit="ms", tz="UTC")]), 0, inclusive=True,
+        ).iloc[0]  # fmt: skip
         sl = inp.book.slice_at_or_before(exp, r)
-        if sl is None or not np.isfinite(fw.forward_usd):
+        if sl is None or not np.isfinite(fw.basis):
             missing += 1
             continue
-        kk = np.log(k / fw.forward_usd)
+        f = fw.basis * index
+        kk = np.log(k / f)
         w = svi_total_variance(*(sl[c] for c in ("a", "b", "rho", "m", "s")), kk)
         sig = float(np.sqrt(max(w, 0.0) / sl["t_ref"]))
         t = (exp - ts_ms) / MS_PER_YEAR
-        opt_eth += n * float(price_eth(fw.forward_usd, k, t, sig, call))
-    if not np.isfinite(index):
-        index = inp.curve.index_at(ts_ms)
+        opt_eth += n * float(price_eth(f, k, t, sig, call))
     perp_eth = perp_value_eth(acct.perp_usd, acct.perp_entry, mark) if acct.perp_usd else 0.0
     eq = acct.eth + opt_eth + perp_eth
     return {

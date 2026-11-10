@@ -29,6 +29,8 @@ uv run pytest                             # all tests
 uv run ruff check . && uv run ruff format .
 uv run python -m mm.run --config config/base.yaml --start YYYY-MM-DD --end YYYY-MM-DD
 uv run python -m mm.sim.handcheck --config config/base.yaml --run START_END   # 20 fills recomputed
+uv run python -m mm.pnl.report --config config/base.yaml --run START_END      # P&L attribution, markouts
+uv run python -m mm.pnl.smile_dynamics --config config/base.yaml              # sticky strike vs moneyness
 
 # data pipeline (UTC dates, --end exclusive, default = config study_period)
 uv run python -m mm.data.cli download --config config/base.yaml [--start D --end D]
@@ -133,12 +135,14 @@ The account holds: ETH balance `B` (collateral, premiums, fees, funding, settled
 ## P&L attribution
 
 - Snapshot every minute, and also revalue at every fill and hedge event.
-- **Waterfall revaluation**, in the fixed order time → spot → vol:
-  - theta = V(t1,S0,σ0) − V(t0,S0,σ0)
-  - spot = V(t1,S1,σ0) − V(t1,S0,σ0), split into delta = Δ_USD·dS and gamma = the remainder
-  - vega = V(t1,S1,σ1) − V(t1,S1,σ0)
+- **Valuation** uses information up to and including t (it is measurement; decisions keep the latency rule; D039).
+- **Waterfall revaluation**, in the fixed order time → spot → basis → vol (D039):
+  - theta = V(t1,S0,b0,σ0) − V(t0,S0,b0,σ0)
+  - spot = V(t1,S1,b0,σ0) − V(t1,S0,b0,σ0), split into delta = Δ_USD·dS and gamma = the remainder
+  - basis = V(t1,S1,b1,σ0) − V(t1,S1,b0,σ0) (futures basis and perp premium)
+  - vega = V(t1,S1,b1,σ1) − V(t1,S1,b1,σ0)
 - **Flows:** spread capture (side × (fair − fill price) at each option fill), hedge execution cost, fees, funding, settlement difference.
-- **Total P&L = theta + delta + gamma + vega + spread capture + hedge cost + fees + funding + settlement + residual.** The residual must be ≈ 0; a large residual is a bug or a missing flow.
+- **Total P&L = theta + delta + gamma + basis + vega + spread capture + hedge cost + fees + funding + settlement + residual.** The residual must be ≈ 0; a large residual is a bug or a missing flow.
 - Greeks for attribution are computed by bump-and-revalue of the full USD account.
 - **Markouts** per fill at 1 min, 5 min, 1 h: `side × (fair(t+h) − fill price)`, raw and **delta-hedged** (subtract Δ·(S(t+h) − S(t))). Delta-hedged is the headline.
 

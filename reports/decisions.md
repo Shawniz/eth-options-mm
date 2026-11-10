@@ -392,3 +392,46 @@ Each entry: the choice, the alternative, why, and the parameter's category:
   - |Δ| stays in the band in 99.0% of the time in both runs.
   - It is the consistent choice, not a fix for the stress loss (see the D037 update).
 - **To test in Phase 7:** whether Deribit's marks actually move closer to sticky moneyness or sticky strike from refit to refit (regress vol changes at fixed k and at fixed K on spot changes). If marks behave like sticky strike, this delta over-hedges.
+
+## D039 — P&L attribution: inclusive valuation, a basis step, replay from logs
+- **Category:** free choice (owner decisions, 2026-11-10)
+- **Choices:**
+  - **Valuation uses information up to and including t** (index, forward basis, latest refit, perp mark of the latest print). It is measurement, not a decision. Decisions keep the latency rule: a quote uses information before t − latency, a hedge executes ≥ decision + latency (checked by an integration test at 5 s latency). The engine's daily snapshots use the same inclusive rule.
+  - **Waterfall per interval, in the order time → spot → basis → vol:** theta, spot (split into delta = Δ·dS with Δ by central bump of the full account at (t1, S0), and gamma = the rest), basis (futures basis and perp premium), vega (the refit).
+  - **Basis** is a fourth step, not part of vega or the residual. F = basis × S, and the perp trades at a premium to the index, so both move independently of S.
+  - **Revaluation points:** every minute plus every fill, hedge, expiry and funding time.
+  - **Flows at events,** in USD at that moment:
+    - spread capture = side·q·S·(fair − price), against valuation fair;
+    - hedge cost = ΔQ·(1/P_exec − 1/P_mark)·S;
+    - option, perp and delivery fees;
+    - funding;
+    - settlement difference = payoff − model value.
+  - **The account is replayed** from fills, hedges and the ledger, independently of the engine, and checked against the engine at every daily snapshot. Residual = engine valuation − sum of components.
+  - **Markouts:** the fill's own USD contribution, side·q·S(t+h)·(fair(t+h) − p) (the premium paid in ETH also revalues). Delta-hedged: minus side·q·(δ − p)·(S(t+h) − S(t)), with δ the smile delta at the fill. At h = 0 this equals spread capture.
+- **Alternatives:** strict valuation (before t), which matches the engine's old snapshots but books inter-print moves as hedge cost; basis folded into vega.
+- **Results:**
+  - **6–12 Jan 2025:** total −$20.7k, residual $0.0000, replay = engine at all 7 snapshots. Theta +20.6k, gamma −19.6k, vega −10.9k, spread capture +10.7k, hedge cost −4.1k, fees −15.7k (perp −11.7k), basis −1.8k. Delta-hedged markouts: +$10.7k at fill, −$3.3k at 1 h; every expiry bucket is negative at 1 h.
+  - **27 Jan – 10 Feb 2025:** total −$127.6k, residual $0.0000. Vega −72.3k, gamma −47.7k, spread capture +39.2k, hedge cost −19.0k, fees −42.3k, theta +15.7k.
+  - **Worst day, 3 Feb:** −$84.3k, most of it 01:00–05:00 during the crash (vega −57k, gamma −14k, hedging −20k, spread capture +20k). All 10 worst fills by 1 h markout are puts we sold into the crash, so the book was short vega as the refits marked vol up. Delta-hedged markouts: +$39.2k at fill, −$3.8k at 5 min, −$85.1k at 1 h.
+  - Staleness (logged edge − spread capture at the inclusive fair) is small at latency 0: −$575 over the fortnight.
+
+## D040 — Smile dynamics: Deribit marks are close to sticky strike over an hour (D038 questioned)
+- **Category:** result (training period 2025-01-01 to 2025-04-28)
+- **Method:** for pairs of refits h apart, with the expiry fitted `full` at both, regress the change in ATM vol through the origin on skew × ln(F1/F0). β = 0 is sticky moneyness (the D038 hedge delta); β = 1 is sticky strike (Black delta). Non-overlapping pairs. `uv run python -m mm.pnl.smile_dynamics --config config/base.yaml`, written to `reports/smile_dynamics.md`.
+- **Result (β, ±2 se):**
+
+  | horizon | 2–8 d | 8–35 d | 35–100 d |
+  |---|---|---|---|
+  | 5 min | 0.24 ± 0.03 | 0.25 ± 0.05 | −0.05 ± 0.16 |
+  | 15 min | 0.42 ± 0.05 | 0.57 ± 0.08 | 0.18 ± 0.25 |
+  | 1 h | 0.86 ± 0.09 | 0.98 ± 0.13 | 1.06 ± 0.35 |
+  | 4 h | 1.36 ± 0.16 | 1.56 ± 0.17 | 1.54 ± 0.45 |
+  | 24 h | 1.10 ± 0.89 | 0.84 ± 0.49 | 0.64 ± 0.93 |
+
+- **Reading:**
+  - Over an hour or more, ATM vol moves along the old smile, as under sticky strike, or by more (spot-vol correlation beyond the skew).
+  - The low short-horizon β is most likely Surface A itself lagging: a 60-minute trailing window with a 10-minute recency weight (D020, D024) can't move the ATM level within 5 minutes.
+  - So D038's sticky-moneyness hedge assumes β = 0 where the data say about 1 over the horizons a hedge is held. **Open decision for the owner**, with options:
+    1. revert to Black delta (β = 1);
+    2. a β-weighted delta, N(d1) − φ(d1)·√T·(σ′(k) − β·σ′(0)), with β from this training-period table;
+    3. keep D038.
