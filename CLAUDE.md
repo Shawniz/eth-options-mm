@@ -120,9 +120,9 @@ The account holds: ETH balance `B` (collateral, premiums, fees, funding, settled
    - Fill size = `min(trade size, our quote size) × max_fill_fraction` (default 0.5).
    - Fill price = our quote. Option fills pay **maker** fees.
    - Every fill is logged with its reason.
-5. **Quoting universe** (config): expiries from `min_days` to `max_days`, strikes with |Black delta| ≥ `min_abs_delta`. Stop quoting an expiry below `min_hours_to_expiry`.
+5. **Quoting universe** (config): expiries from `min_days` to `max_days` (`min_days` is also the near-expiry cut-off), strikes with OTM delta min(|Δ_call|, |Δ_put|) ≥ `min_abs_delta` at fair vol (D030).
 6. **Spread:** a flat half-spread in vol points around fair vol, with a minimum price width (ticks, and enough to cover fees). Bids rounded down, asks up.
-7. **Inventory skew:** both quotes shift by `Δσ = −κ · net_vega / vega_ref` (total book vega).
+7. **Inventory skew:** both quotes shift by `Δσ = −κ · net_vega / vega_ref` (total book vega), capped at ±h so we never quote through fair (D032).
 8. **Sizing:** capped vega-normalised by default: `size = min(target_vega / vega_i, max_contracts)`, rounded down to the order increment; no quote below the minimum order size. Fixed-contract sizing kept as a config option for a robustness check.
 9. **Hedging:** one policy: when `|Δ_USD|` exceeds `delta_band`, hedge back to zero with the perpetual as a **taker** (taker fee plus `hedge_cost_bps` slippage).
 10. **Limits:** total vega limit and per-instrument position limit. Near a limit, quote only the risk-reducing side.

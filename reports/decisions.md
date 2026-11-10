@@ -265,3 +265,52 @@ Each entry: the choice, the alternative, why, and the parameter's category:
 - **Observed on 6–12 Jan 2025 (placeholder quoter, ±2 vol points):**
   - **Volume share:** we fill 4.7% of trades and 0.78% of contracts; 20/20 hand-checked fills match.
   - **Wings:** in the far wings (more than 2 standard deviations from the forward), our fair vol at fills is a median 5.5 vol points below Deribit's mark. The 3-parameter eSSVI smile can't follow the steep put wing, and vega weighting gives it little weight in the fit. Because fills concentrate where we are mispriced, that's where it shows. Phase 5's minimum |delta| universe rule should keep us out of those strikes.
+
+## D030 — Quoting universe: tenor ≥ 2 days, OTM delta ≥ 0.10
+- **Category:** free choice, backed by data (training week 6–12 Jan 2025; owner decision, 2026-11-10)
+- **Choice:**
+  - Quote expiries with `min_days ≤ T ≤ max_days` (2 to 90 days). CLAUDE.md's `min_hours_to_expiry` is the same rule as `min_days` once both apply per expiry, so only `min_days` is kept.
+  - Quote a strike only if its **OTM delta**, min(|Δ_call|, |Δ_put|) at fair vol (Black delta), is ≥ `min_abs_delta` = 0.10. OTM delta, not the option's own |delta|, because a deep ITM call sits on the same mispriced put wing as the OTM put at that strike.
+- **Alternatives:** 1-day cut-off (Phase 4 placeholder); a plain |delta| rule; a 0.05 threshold.
+- **Evidence:** Phase 4 fills compared with Deribit mark IV (fair = Surface A slice at k = ln(K/F_q), latency 0; mark IV from the priced cache). Median fair − mark (vol points), p90 of |gap| in brackets:
+  - more than 4 days: below 0.05 delta −5.64 (13.7); 0.05–0.10 +2.09 (5.5); 0.10–0.20 +2.88 (6.9); ≥ 0.20 −1.04 (4.1)
+  - 1–2 days: at ≥ 0.20 delta the p90 is still 7.5; below 0.05 delta it is 15.0
+  - Half of all Phase 4 fills came from strikes below 0.05 delta.
+- **Why:** Below 0.05 delta the surface is clearly wrong. **0.05–0.10 is borderline** (its gap is no worse than 0.10–0.20 on this sample). 0.10 was chosen to leave a margin, not because the data force it. 1–2 day options are noisy even near the money, well past any spread we would quote.
+- **Caveats:**
+  - One week of training data, a few hundred fills per bucket.
+  - The mark is Deribit's model, not the truth.
+  - Fair vol comes from a refit up to 5 minutes old, while the mark is at the trade, so part of the gap is staleness.
+
+## D031 — Price floor and rounding
+- **Category:** free choice (`min_half_width_ticks`, `fee_cover`); tick and fee from specs
+- **Choice:** Around the skewed centre price P_c = P(σ_c), each side is at least
+  half_min = max(`min_half_width_ticks` × tick(P_c), `fee_cover` × maker fee(P_c)) away:
+  bid = round_down(min(P(σ_c − h), P_c − half_min)), ask = round_up(max(P(σ_c + h), P_c + half_min)).
+  Defaults are 1 tick and 1 × fee, so each fill at least pays its own fee relative to the centre. No bid if it would fall below the minimum tick. Quotes stay at least one tick wide.
+- **Alternative:** a floor around fair rather than around the skewed centre; a fee floor only.
+- **Why:** The floor is about width, not edge. Skew is meant to move the whole quote, so the floor moves with it. Rounding down the bid and up the ask never improves our price beyond the model's.
+- **Observed (6–12 Jan 2025, h = 1 vol point):** the floor sets a side at 47% of fills: 90% at 2–8 days (median vega $0.92 per contract, so 1 vol point is less than a 0.0005 tick), 15% at 8–35 days, 0% at 35–100 days. **Phase 8 note:** at short expiries the narrow spread settings (0.5 and 1 vol point) are the same quote; the spread experiment mainly moves the longer expiries.
+
+## D032 — Inventory skew on total book vega, capped at the half-spread
+- **Category:** free choice (owner decision on the cap, 2026-11-10)
+- **Choice:** Δσ = clip(−κ · V / V_ref, −h, +h) and σ_c = σ_fair + Δσ, where V = Σ nᵢ · Black vegaᵢ · S/F (USD per vol point) is the book's vega.
+  - V is recomputed at each refit from information before the refit (each expiry's latest live slice, forwards strictly before R), updated by each fill's vega, and recomputed after expiries.
+  - Defaults: κ = 1 vol point, V_ref = $5,000 per vol point (Phase 6 ties V_ref to the vega limit).
+- **Alternatives:** no cap (the inner quote can cross fair, so we pay to unload); a separate `max_skew_volpts` cap.
+- **Why:**
+  - Shifting by vol points moves each option's price by Δσ × its own vega, so the shift scales with the vega each fill adds or removes. This is the vega analogue of an Avellaneda–Stoikov reservation price.
+  - The cap at h means we never quote through fair:
+    - spread capture stays non-negative against the centre;
+    - the Phase 8 spread and skew runs don't partly measure crossing fair;
+    - extremes are left to the Phase 6 vega limit.
+  - Cost: strong κ saturates earlier.
+- **Known simplification:** total vega nets front-month against back-month (term-structure risk is ignored; vega buckets are in extensions.md).
+- **Observed (6–12 Jan 2025, unhedged):** net vega at fills ranged from −$1,279 to +$674 per vol point, so |skew| ≤ 0.26 vol points (median 0.10) and the cap never bound. Skews below about 0.2 vol points are often hidden by tick rounding on short expiries.
+
+## D033 — Capped vega-normalised sizing
+- **Category:** free choice
+- **Choice:** size = floor(min(`target_vega_usd` / vegaᵢ, `max_contracts`)) to the order increment, where vegaᵢ = Black vega × S/F (USD per vol point per contract). No quote below the minimum order. `sizing: fixed` (`fixed_contracts`) is kept for the Phase 8 robustness check. Defaults: $50 per vol point, cap 25 contracts.
+- **Alternative:** fixed contracts (the Phase 4 placeholder).
+- **Why:** Every quote offers about the same vega risk, so a fill in a 60-day option and a fill in a 5-day option move the book's vega by similar amounts. The cap stops low-vega short expiries from being quoted in very large size.
+- **Observed (6–12 Jan 2025):** the cap binds on 60% of fills (median size 25 at 2–8 days, 22 at 8–35 days, 11 at 35–100 days). In practice short expiries are fixed-size at the cap. Whether to raise the cap or lower the target is a Phase 8 sensitivity, not tuned here.
