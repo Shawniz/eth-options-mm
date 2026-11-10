@@ -1,31 +1,31 @@
 # Phase 8 experiments (decisions D042). Each variant is an override of config/base.yaml,
-# validated by the same strict config model. One parameter at a time; the baseline is
+# validated by the same strict config model. Lean grid (owner, 2026-11-10: the method, not an
+# exhaustive search; 14 runs on an 8 GB laptop). One parameter at a time; the baseline is
 # base.yaml itself, so each experiment's list must contain the base value.
 settings:
   stress_dvol_quantile: 0.8   # stress day: daily mean DVOL >= this quantile of TRAIN days
-  workers: 2                  # parallel runs: ~4-5 GB each over the 118-day train period (8 GB RAM)
+  train_workers: 1            # 118-day runs need ~5 GB each: one at a time on 8 GB RAM
+  test_workers: 2             # 63-day runs need ~2.5-3 GB each
   out_dir: data/runs/exp
 
 experiments:
   spread:                     # selected on train, reported on test
     param: [quoting, half_spread_volpts]
-    values: [0.5, 1.0, 2.0, 3.0]
+    values: [0.5, 1.0, 2.0]
     select: true
   skew:
     param: [quoting, kappa_volpts]
-    values: [0.0, 1.0, 3.0]
+    values: [0.0, 1.0]
     select: true
   band:
     param: [hedging, delta_band_eth]
-    values: [2.5, 5.0, 10.0, 20.0]
+    values: [5.0, 10.0]
     select: true
   latency:                    # a condition, not a choice: test period only
     param: [sim, latency_ms]
-    values: [0, 1000, 5000]
+    values: [0, 1000]
     select: false
 
 robustness:                   # applied on top of the best setting, test period
   stricter_fills: {fill: {max_fill_fraction: 0.25}}
   looser_fills: {fill: {max_fill_fraction: 1.0, at_price_fill_fraction: 0.5}}
-  fixed_size: {quoting: {sizing: fixed, fixed_contracts: 10.0}}
-  random_fills: {sim: {fill_sizing: random}}

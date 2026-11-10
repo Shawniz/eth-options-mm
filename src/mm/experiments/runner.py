@@ -143,7 +143,8 @@ def run_experiments(base_path: str, exp_path: str, workers: int | None = None) -
     base = load_config(base_path)
     exp = yaml.safe_load(Path(exp_path).read_text())
     st = exp["settings"]
-    workers = workers or st["workers"]
+    w_train = workers or st["train_workers"]
+    w_test = workers or st["test_workers"]
     root = Path(st["out_dir"])
     sp = base.study_period
     train = (str(sp.start), str(sp.train_end))
@@ -154,7 +155,7 @@ def run_experiments(base_path: str, exp_path: str, workers: int | None = None) -
 
     print(f"Train {train[0]} -> {train[1]}: {len(selectable)} runs", flush=True)
     tr = _run_all(base_path, {n: (variants[n], *train, root / "train" / n)
-                              for n in sorted(selectable)}, workers)  # fmt: skip
+                              for n in sorted(selectable)}, w_train)  # fmt: skip
 
     def mean_daily(n, period):
         return float(pd.read_parquet(root / period / n / "daily_pnl.parquet")["total"].mean())
@@ -180,7 +181,7 @@ def run_experiments(base_path: str, exp_path: str, workers: int | None = None) -
     for rn, ro in exp["robustness"].items():
         jobs[f"best+{rn}"] = (_deep(best_override, ro), *test, root / "test" / f"best+{rn}")
     print(f"Test {test[0]} -> {test[1]}: {len(jobs)} runs", flush=True)
-    te = _run_all(base_path, jobs, workers)
+    te = _run_all(base_path, jobs, w_test)
     meta = {"train": train, "test": test, "best": best, "best_override": best_override,
             "variants": {n: o for n, (o, *_rest) in jobs.items()}}  # fmt: skip
     (root / "meta.json").write_text(json.dumps(meta, indent=2, default=str))

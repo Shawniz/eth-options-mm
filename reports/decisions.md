@@ -467,6 +467,7 @@ Each entry: the choice, the alternative, why, and the parameter's category:
 - **Stress day:** daily mean DVOL ≥ the 80th percentile of **training** days.
 - **Comparison:** paired daily differences against the baseline, mean ± 2 standard errors, with the lag-1 autocorrelation reported as a warning that the error bar may be too narrow.
 - **Reproduction:** one command, `uv run python -m mm.run --config config/base.yaml --experiments config/experiments.yaml`. Each run is cached by a hash of its resolved config, so an interrupted batch resumes.
+- **Lean grid (owner, 2026-11-10):** the project should show the method, not an exhaustive search, on an 8 GB laptop. So: spread {0.5, **1**, 2}, κ {0, **1**}, band {**5**, 10}, latency {**0**, 1 s}; robustness = stricter and looser fills only. That is 14 runs (5 train, 9 test), with training runs one at a time (about 5 GB each) and test runs two at a time. The dropped values (spread 3, κ 3, bands 2.5 and 20, latency 5 s, fixed and random sizing) can be added back to `config/experiments.yaml`; cached runs are reused.
 
 ## D043 — A cash-gamma limit
 - **Category:** from data (training period) plus a free choice (the 12% budget, the same as the vega limit); owner decision, 2026-11-10
