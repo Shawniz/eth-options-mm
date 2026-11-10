@@ -168,13 +168,22 @@ class QuotingConfig(_Strict):
     half_spread_volpts: float = Field(ge=0)
     min_half_width_ticks: float = Field(ge=0)
     fee_cover: float = Field(ge=0)
-    kappa_volpts: float = Field(ge=0)
-    vega_ref_usd: float = Field(gt=0)
+    kappa_volpts: float = Field(ge=0)  # skew at net vega = risk.vega_limit_usd
     sizing: Literal["vega", "fixed"]
     target_vega_usd: float = Field(gt=0)
     max_contracts: float = Field(gt=0)
     fixed_contracts: float = Field(gt=0)
     universe: UniverseConfig
+
+
+class HedgingConfig(_Strict):
+    delta_band_eth: float = Field(gt=0)
+    hedge_cost_bps: float = Field(ge=0)
+
+
+class RiskConfig(_Strict):
+    vega_limit_usd: float = Field(gt=0)
+    max_position_contracts: float = Field(gt=0)
 
 
 class FillConfig(_Strict):
@@ -231,6 +240,8 @@ class Config(_Strict):
     sim: SimConfig
     fill: FillConfig
     quoting: QuotingConfig
+    hedging: HedgingConfig
+    risk: RiskConfig
     surface: SurfaceConfig
 
 

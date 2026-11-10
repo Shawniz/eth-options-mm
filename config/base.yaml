@@ -96,14 +96,13 @@ fill:
   max_fill_fraction: 0.5
 
 quoting:                       # Phase 5 quoter (decisions D030-D033)
-  # centre vol  sigma_c = sigma_fair - clip(kappa * net_vega / vega_ref, -h, +h)
+  # centre vol  sigma_c = sigma_fair - clip(kappa * net_vega / vega_limit, -h, +h)
   # bid = P(sigma_c - h), ask = P(sigma_c + h), each at least half_min from P(sigma_c),
   # half_min = max(min_half_width_ticks x tick, fee_cover x maker fee); bid down, ask up.
   half_spread_volpts: 1.0      # h; free choice, Phase 8 tests 0.5 / 1 / 2 / 3
   min_half_width_ticks: 1.0
   fee_cover: 1.0               # half-width >= this x maker fee per contract
-  kappa_volpts: 1.0            # skew at net_vega = vega_ref; capped at h (D032)
-  vega_ref_usd: 5000.0         # USD per vol point; Phase 6 ties it to the vega limit
+  kappa_volpts: 1.0            # skew at net_vega = risk.vega_limit_usd; capped at h (D032, D035)
   sizing: vega                 # vega: min(target_vega / vega_i, max_contracts); fixed
   target_vega_usd: 50.0        # USD per vol point per quote
   max_contracts: 25.0
@@ -112,6 +111,20 @@ quoting:                       # Phase 5 quoter (decisions D030-D033)
     min_days: 2.0              # includes CLAUDE.md's min_hours_to_expiry (same rule)
     max_days: 90.0
     min_abs_delta: 0.10        # OTM delta at fair vol (Black delta)
+
+hedging:                       # Phase 6 (decisions D034, D036)
+  # |account delta| > band -> hedge back to zero with the perpetual as a taker. The order
+  # fills at the first same-side perp print strictly after the trigger with
+  # ts >= trigger + latency, at that print x (1 +- hedge_cost_bps), plus the taker fee.
+  delta_band_eth: 5.0          # free choice (~$16k); hedge count vs carried delta
+  hedge_cost_bps: 1.0          # size impact on top of the real spread (hedges > 98% of prints)
+
+risk:                          # Phase 6 (decision D035)
+  vega_limit_usd: 2000.0       # |net book vega|, USD per vol pt: a 10-vol-pt shock ~ 12% of
+                               # 50 ETH equity. Also the skew scale (kappa applies here).
+  max_position_contracts: 100.0   # per instrument, 4x the max quote size
+  # Each side's size is cut to the room left under both limits; below the minimum order
+  # the side is not quoted. Fills never exceed the quote, so only drift can breach.
 
 surface:                     # Surface A: SVI per expiry on Deribit mark IVs (D020-D022)
   refit_interval_s: 300        # 1-5 minutes allowed

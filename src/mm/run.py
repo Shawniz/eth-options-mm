@@ -45,9 +45,15 @@ def main(argv: list[str] | None = None) -> Config:
     save(res, run_dir)
     summary = write_report(cfg, inp, res, label, Path(f"reports/sim_{label}.md"))
     write_summary(summary, run_dir)
+    from mm.sim.figures import delta_figure, vega_figure
+
+    figs = Path("reports/figures")
+    delta_figure(cfg, inp, res, figs / f"sim_{label}_delta.png")
+    vega_figure(cfg, res, figs / f"sim_{label}_vega.png")
     print(
         f"fills {summary['fills']:,}, share {summary['share_of_contracts'] * 100:.2f}%, "
-        f"final ETH {summary['final_eth']:.4f} -> {run_dir}"
+        f"hedges {summary['hedging']['hedges']:,}, final ETH {summary['final_eth']:.4f} "
+        f"-> {run_dir}"
     )
     return cfg
 

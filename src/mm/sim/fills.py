@@ -43,6 +43,8 @@ def cross(taker_dir: str, trade_px: float, bid, ask, fcfg: FillConfig):
         if abs(bid - trade_px) <= 1e-12 and fcfg.at_price_fill_fraction > 0:
             return "buy", bid, fcfg.at_price_fill_fraction, AT_PRICE
         return None
+    if ask is None:
+        return None
     if ask < trade_px - 1e-12:
         return "sell", ask, 1.0, ASK_BELOW
     if abs(ask - trade_px) <= 1e-12 and fcfg.at_price_fill_fraction > 0:
@@ -82,7 +84,7 @@ def decide(
     ts_ms: int,
     bid,
     ask,
-    size: float,
+    size,  # contracts, or (bid_size, ask_size) when limits cut one side
     book: QuoteBook,
     fcfg: FillConfig,
     sizing: str = "expected",
@@ -92,6 +94,8 @@ def decide(
     if c is None:
         return None
     side, px, frac, reason = c
+    if isinstance(size, tuple):
+        size = size[0] if side == "buy" else size[1]
     left = book.available(instrument, side, ts_ms, size)
     eligible = min(trade_qty, left)
     if eligible <= 0:

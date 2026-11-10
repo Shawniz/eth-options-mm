@@ -10,11 +10,13 @@ For N random fills (seeded) it recomputes, with its own queries and formulas:
                  forward, which Phase 2 validated; the table says which.
   fair vol       raw SVI w(k) of that refit's slice: sqrt(w / t_ref)
   universe       tenor and OTM delta min(N(d1), 1 - N(d1)) at fair vol
-  quotes         Black-76 with scipy.stats.norm: skew -kappa x net_vega / vega_ref capped
+  quotes         Black-76 with scipy.stats.norm: skew -kappa x net_vega / vega_limit capped
                  at h, +- h around the centre, price floor max(ticks, fee), own rounding.
                  net_vega is taken from the fill log (it depends on the whole book's
                  history); everything downstream of it is recomputed.
-  size           vega: floor(min(target / (Black vega x S/F), max)); fixed: fixed_contracts
+  size           vega: floor(min(target / (Black vega x S/F), max)); fixed: fixed_contracts;
+                 then our side cut to the room under the vega and position limits, from the
+                 logged net vega and position before the fill
   fill           strict rule, size min(trade, quote) x fraction, maker fee with cap
 Writes reports/phase5_handcheck.md (--out).
 """
@@ -113,9 +115,18 @@ def check(cfg, run: str, n: int, seed: int) -> pd.DataFrame:
         raw_size = (qc.fixed_contracts if qc.sizing == "fixed"
                     else min(qc.target_vega_usd / vega_i, qc.max_contracts))  # fmt: skip
         inc = spec.min_order_contracts
-        size = math.floor(raw_size / inc + 1e-9) * inc
+        base = math.floor(raw_size / inc + 1e-9) * inc
+        rk = cfg.risk
+        if r.our_side == "buy":
+            room = min(rk.max_position_contracts - r.pos_before,
+                       (rk.vega_limit_usd - r.net_vega_usd) / vega_i)  # fmt: skip
+        else:
+            room = min(rk.max_position_contracts + r.pos_before,
+                       (rk.vega_limit_usd + r.net_vega_usd) / vega_i)  # fmt: skip
+        size = math.floor(min(base, room) / inc + 1e-9) * inc
+        side_size = r.bid_size if r.our_side == "buy" else r.ask_size
         h = qc.half_spread_volpts / 100
-        skew = -qc.kappa_volpts * r.net_vega_usd / qc.vega_ref_usd / 100
+        skew = -qc.kappa_volpts * r.net_vega_usd / cfg.risk.vega_limit_usd / 100
         skew = max(-h, min(h, skew))
         sc = sig + skew
         pc = _black_eth(fwd, r.strike_usd, t, sc, call)
@@ -140,7 +151,8 @@ def check(cfg, run: str, n: int, seed: int) -> pd.DataFrame:
             and abs(idx - r.index_q) < 1e-9
             and abs(fwd - r.forward_q) < 1e-6 * fwd
             and in_univ
-            and abs(size - r.quote_size) < 1e-9
+            and abs(base - r.quote_size) < 1e-9
+            and abs(size - side_size) < 1e-9
             and abs(sc - r.sigma_center) < 1e-9
             and crosses
             and abs(our_px - r.fill_price) < 1e-12
@@ -159,7 +171,7 @@ def check(cfg, run: str, n: int, seed: int) -> pd.DataFrame:
                 "otm delta": otm,
                 "net vega $": r.net_vega_usd,
                 "skew (vp)": skew * 100,
-                "size (check/sim)": f"{size:g}/{r.quote_size:g}",
+                "size (check/sim)": f"{size:g}/{side_size:g}",
                 "bid (check)": bid,
                 "ask (check)": ask,
                 "bid (sim)": r.bid,

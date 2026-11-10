@@ -32,9 +32,12 @@ class Account:
     ledger: list[tuple[int, str, str, float]] = field(default_factory=list)
     position_log: list[tuple[int, str, str, float]] = field(default_factory=list)
     _flow_sum: float = field(init=False, default=0.0)
+    perp_log: list[tuple[int, float, float]] = field(default_factory=list)  # ts, dQ, price
+    _initial_perp: float = field(init=False, default=0.0)
 
     def __post_init__(self):
         self._eth = self.initial_eth
+        self._initial_perp = self.perp_usd
 
     @property
     def eth(self) -> float:
@@ -65,6 +68,19 @@ class Account:
         self.post(ts_ms, "fee", -fee_eth, instrument)
         self.move(ts_ms, "fill", instrument, signed)
 
+    def perp_trade(self, ts_ms: int, dq_usd: float, price: float, fee_eth: float) -> None:
+        """Hedge: settle the open perp P&L into B at the trade price, reset P0, add dQ.
+        Settlement leaves delta unchanged: B + Q/P0 -> B + Q/P0 - Q/P + Q/P."""
+        if not (price > 0 and math.isfinite(price)):
+            raise InvariantError(f"bad perp price {price}")
+        if self.perp_usd:
+            self.post(ts_ms, "perp_pnl", self.perp_usd * (1 / self.perp_entry - 1 / price), "perp")
+        self.perp_entry = price
+        self.perp_usd += dq_usd
+        self.perp_log.append((ts_ms, dq_usd, price))
+        if fee_eth:
+            self.post(ts_ms, "perp_fee", -fee_eth, "perp")
+
     def check(self) -> None:
         if abs(self._eth - (self.initial_eth + self._flow_sum)) > 1e-9 * max(1.0, abs(self._eth)):
             raise InvariantError("ETH balance differs from initial + sum of ledger flows")
@@ -82,3 +98,6 @@ class Account:
             abs(pos[k] - self.positions[k]) > 1e-9 for k in pos
         ):
             raise InvariantError("positions differ from the fill/expiry log")
+        q = self._initial_perp + math.fsum(dq for _, dq, _ in self.perp_log)
+        if abs(q - self.perp_usd) > 1e-6:
+            raise InvariantError(f"perp log gives Q = {q}, account has {self.perp_usd}")

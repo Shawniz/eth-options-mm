@@ -1,10 +1,13 @@
-"""Event loop: real option trades fill a quoter; fees, expiry settlement, funding.
+"""Event loop: real option trades fill a quoter; the perpetual hedges; fees, expiry
+settlement, funding.
 
-Events in time order; at the same timestamp: settlement and funding (0) -> daily
-snapshot (1) -> option trades (2), the trades in exchange order (ts, trade_seq).
-Surface refits are read from the Phase 3 cache through fair.py (refit -> quote order).
-Perpetual trades are not events yet: the underlying comes from the forward curve. They
-join the loop in Phase 6 (hedging).
+Events in time order; at the same timestamp: settlement and funding (0) -> perpetual
+prints (1, the underlying update) -> daily snapshot (2) -> option trades (3), each stream
+in exchange order. Surface refits are read from the Phase 3 cache through fair.py
+(refit -> quote order). A hedge check follows every perp print and every option fill
+(underlying -> refit -> quote and fill -> hedge, CLAUDE.md). A hedge decided at a print
+or fill executes at the first same-side perp print strictly after it with
+ts >= decision + latency (D036).
 """
 
 from __future__ import annotations
@@ -17,12 +20,15 @@ import pandas as pd
 
 from mm.config import Config
 from mm.data.instruments import parse_instrument
+from mm.hedging.hedger import exec_price, hedge_qty, needs_hedge, perp_fee_eth
 from mm.pricing.black76 import price_eth
 from mm.pricing.forwards import ForwardCurve
 from mm.pricing.time import MS_PER_YEAR
-from mm.quoting.quoter import in_universe, make_quote
-from mm.risk.greeks import book_vega_usd
+from mm.quoting.quoter import apply_limits, in_universe, make_quote
+from mm.risk.greeks import book_vega_usd, perp_value_eth
+from mm.risk.limits import side_room
 from mm.sim.account import Account
+from mm.sim.delta import OptionDelta
 from mm.sim.fair import SurfaceBook, svi_total_variance
 from mm.sim.fees import delivery_fee_eth, funding_eth, is_daily_expiry, option_fee_eth, payoff_eth
 from mm.sim.fills import QuoteBook, decide
@@ -40,6 +46,7 @@ class SimInputs:
     activity_ms: np.ndarray  # timestamps of every trade on every stream (pauses)
     start_ms: int
     end_ms: int
+    perp: pd.DataFrame | None = None  # ts_ms, direction, price_usd, mark_price_usd, index_price_usd
 
 
 @dataclass
@@ -50,6 +57,10 @@ class SimResult:
     skips: Counter
     account: Account
     pauses: pd.DataFrame
+    hedges: pd.DataFrame
+    delta: pd.DataFrame  # account delta at every hedge check
+    quotes: pd.DataFrame  # every quote that reached the limit stage
+    limits: Counter
 
 
 def find_pauses(activity_ms: np.ndarray, gap_s: float, grid: np.ndarray) -> pd.DataFrame:
@@ -82,8 +93,9 @@ class _Meta:
         return self._c[name]
 
 
-def _value(acct: Account, ts_ms: int, inp: SimInputs, meta: _Meta) -> dict:
-    """Account value at Surface A (CLAUDE.md 13): W = S (B + sum n_i C_i/F_i)."""
+def _value(acct: Account, ts_ms: int, inp: SimInputs, meta: _Meta, mark, delta) -> dict:
+    """Account value at Surface A (CLAUDE.md 13): W = S (B + sum n_i C_i/F_i + perp),
+    perp = Q (1/P0 - 1/mark) at the latest perp mark."""
     r = int(inp.book.latest_refit(np.array([ts_ms]))[0])
     opt_eth, missing = 0.0, 0
     index = np.nan
@@ -104,13 +116,18 @@ def _value(acct: Account, ts_ms: int, inp: SimInputs, meta: _Meta) -> dict:
         opt_eth += n * float(price_eth(fw.forward_usd, k, t, sig, call))
     if not np.isfinite(index):
         index = inp.curve.index_at(ts_ms)
+    perp_eth = perp_value_eth(acct.perp_usd, acct.perp_entry, mark) if acct.perp_usd else 0.0
+    eq = acct.eth + opt_eth + perp_eth
     return {
         "ts_ms": ts_ms,
         "eth_balance": acct.eth,
         "options_eth": opt_eth,
-        "equity_eth": acct.eth + opt_eth,
+        "perp_eth": perp_eth,
+        "equity_eth": eq,
         "index_usd": index,
-        "equity_usd": index * (acct.eth + opt_eth),
+        "equity_usd": index * eq,
+        "perp_usd": acct.perp_usd,
+        "delta_eth": delta,
         "n_positions": len(acct.positions),
         "n_unvalued": missing,
     }
@@ -142,11 +159,16 @@ def _book_vega(acct: Account, refit_ms: int, inp: SimInputs, meta: _Meta) -> flo
 
 def run(inp: SimInputs, cfg: Config) -> SimResult:
     spec, qcfg, fcfg, sc = cfg.specs.option, cfg.quoting, cfg.fill, cfg.sim
+    hcfg, rcfg, pspec = cfg.hedging, cfg.risk, cfg.specs.perp
     acct = Account(sc.initial_eth)
     qbook = QuoteBook(sc.latency_ms)
     meta = _Meta()
+    odelta = OptionDelta(inp.book, inp.curve, meta)
     skips: Counter = Counter()
-    fills, daily = [], []
+    lim: Counter = Counter()
+    fills, daily, hedges, quotes = [], [], [], []
+    d_ts: list[int] = []
+    d_val: list[float] = []
 
     tr = inp.trades
     tr = tr[(tr["ts_ms"] >= inp.start_ms) & (tr["ts_ms"] < inp.end_ms)]
@@ -154,7 +176,18 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
     pauses = find_pauses(inp.activity_ms, sc.pause_gap_s, inp.book.grid)
     blocked = _blocked(tr["ts_ms"].to_numpy(), pauses)
 
-    # non-trade events: (ts, priority, kind, payload)
+    pp_df = inp.perp if inp.perp is not None else pd.DataFrame(
+        columns=["ts_ms", "direction", "price_usd", "mark_price_usd", "index_price_usd"]
+    )  # fmt: skip
+    pp_df = pp_df[(pp_df["ts_ms"] >= inp.start_ms) & (pp_df["ts_ms"] < inp.end_ms)]
+    p_ts = pp_df["ts_ms"].to_numpy("int64")
+    p_buy = (pp_df["direction"] == "buy").to_numpy()
+    p_px = pp_df["price_usd"].to_numpy(float)
+    p_mark = pp_df["mark_price_usd"].to_numpy(float)
+    p_idx = pp_df["index_price_usd"].to_numpy(float)
+    n_perp = len(p_ts)
+
+    # non-trade events: (ts, priority, kind, payload); perp prints (priority 1) merge in
     ev = [(int(e), 0, "expiry", None) for e in np.unique(tr["exp_ms"]) if e < inp.end_ms]
     f = inp.funding
     f = f[(f["available_ms"] >= inp.start_ms) & (f["available_ms"] < inp.end_ms)]
@@ -163,12 +196,51 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
         for a, r, i in zip(f["available_ms"], f["interest_1h"], f["index_price_usd"], strict=True)
     ]
     first_day = (inp.start_ms // DAY_MS + 1) * DAY_MS
-    ev += [(int(d), 1, "snapshot", None) for d in range(first_day, inp.end_ms + 1, DAY_MS)]
+    ev += [(int(d), 2, "snapshot", None) for d in range(first_day, inp.end_ms + 1, DAY_MS)]
     if inp.end_ms % DAY_MS:
-        ev.append((inp.end_ms, 1, "snapshot", None))
+        ev.append((inp.end_ms, 2, "snapshot", None))
     ev.sort(key=lambda x: (x[0], x[1]))
-    pos = 0
+    st = {"ev": 0, "pp": 0, "S": np.nan, "mark": np.nan, "pending": None}
     vega_state = {"refit": None, "net": 0.0}  # net book vega, recomputed at each refit
+
+    def account_delta(ts: int) -> float:
+        d = acct.eth + odelta.total(acct, ts, st["S"])
+        return d + (acct.perp_usd / acct.perp_entry if acct.perp_usd else 0.0)
+
+    def hedge_check(ts: int) -> None:
+        """Decide a hedge (if none pending). Trigger = last perp print processed."""
+        if st["pending"] is not None or not np.isfinite(st["S"]):
+            return
+        d = account_delta(ts)
+        d_ts.append(ts)
+        d_val.append(d)
+        if needs_hedge(d, hcfg.delta_band_eth):
+            dq = hedge_qty(d, st["S"], pspec.contract_size_usd)
+            if abs(dq) >= pspec.min_order_usd:
+                st["pending"] = {"dq": dq, "ready": ts + sc.latency_ms, "after": st["pp"] - 1,
+                                 "decide_ms": ts, "delta": d, "S": st["S"]}  # fmt: skip
+
+    def on_perp(j: int) -> None:
+        ts = int(p_ts[j])
+        st["S"], st["mark"] = p_idx[j], p_mark[j]
+        h = st["pending"]
+        if h is not None and j > h["after"] and ts >= h["ready"] and p_buy[j] == (h["dq"] > 0):
+            sign = 1 if h["dq"] > 0 else -1
+            px = exec_price(p_px[j], sign, hcfg.hedge_cost_bps)
+            fee = perp_fee_eth(h["dq"], px, pspec)
+            q_before = acct.perp_usd
+            acct.perp_trade(ts, h["dq"], px, fee)
+            acct.check()
+            st["pending"] = None
+            hedges.append({
+                "decide_ms": h["decide_ms"], "exec_ms": ts, "wait_ms": ts - h["decide_ms"],
+                "delta_before": h["delta"], "index_at_decision": h["S"], "dq_usd": h["dq"],
+                "q_before_usd": q_before, "q_after_usd": acct.perp_usd, "print_usd": p_px[j],
+                "exec_usd": px, "fee_eth": fee,
+                # cost of the bps vs the print, in ETH: dQ (1/print - 1/exec) >= 0
+                "slippage_eth": h["dq"] * (1 / p_px[j] - 1 / px),
+            })  # fmt: skip
+        hedge_check(ts)
 
     def handle(e):
         ts, _, kind, payload = e
@@ -186,13 +258,31 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
                 )
                 acct.move(ts, "expiry", name, -n)
             vega_state["refit"] = None  # positions gone: recompute at the next trade
+            odelta.invalidate()
         elif kind == "funding":
             rate, index = payload
             if acct.perp_usd:
                 acct.post(ts, "funding", funding_eth(acct.perp_usd, rate, index), "perp")
         elif kind == "snapshot":
-            daily.append(_value(acct, ts, inp, meta))
+            dl = account_delta(ts) if np.isfinite(st["S"]) else np.nan
+            daily.append(_value(acct, ts, inp, meta, st["mark"], dl))
         acct.check()
+
+    def advance(until: int) -> None:
+        """Process events and perp prints with ts <= until, in (ts, priority) order."""
+        while True:
+            te = ev[st["ev"]][0] if st["ev"] < len(ev) else None
+            tp = int(p_ts[st["pp"]]) if st["pp"] < n_perp else None
+            e_ok = te is not None and te <= until
+            p_ok = tp is not None and tp <= until
+            if not (e_ok or p_ok):
+                return
+            if e_ok and (not p_ok or te < tp or (te == tp and ev[st["ev"]][1] < 1)):
+                handle(ev[st["ev"]])
+                st["ev"] += 1
+            else:
+                st["pp"] += 1
+                on_perp(st["pp"] - 1)
 
     cols = [
         "ts_ms", "trade_id", "trade_seq", "instrument_name", "direction", "price_eth",
@@ -201,9 +291,7 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
         "is_liquidation", "otm_delta", "vega_usd",
     ]  # fmt: skip
     for i, row in enumerate(tr[cols].itertuples(index=False)):
-        while pos < len(ev) and ev[pos][0] <= row.ts_ms:
-            handle(ev[pos])
-            pos += 1
+        advance(row.ts_ms)
         days = row.t_years * 365
         u = qcfg.universe
         if not (u.min_days <= days <= u.max_days):
@@ -225,10 +313,27 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
             vega_state["refit"] = row.refit_ms
             vega_state["net"] = _book_vega(acct, int(row.refit_ms), inp, meta)
         call = row.option_type == "C"
-        q = make_quote(row.sigma_fair, row.forward_q, row.strike_usd, row.t_years, call,
-                       vega_state["net"], qcfg, spec, row.index_q)  # fmt: skip
-        if q is None:
+        v_net = vega_state["net"]
+        q0 = make_quote(row.sigma_fair, row.forward_q, row.strike_usd, row.t_years, call,
+                        v_net, qcfg, spec, rcfg.vega_limit_usd, row.index_q)  # fmt: skip
+        if q0 is None:
             skips["no_size"] += 1
+            continue
+        pos_before = acct.positions.get(row.instrument_name, 0.0)
+        bid_room, ask_room = side_room(vega_state["net"], row.vega_usd, pos_before, rcfg)
+        q = apply_limits(q0, bid_room, ask_room, spec)
+        for side, before, after in (("bid", q0.bid, q.bid), ("ask", q0.ask, q.ask)):
+            if before is None:
+                continue
+            size_after = q.bid_size if side == "bid" else q.ask_size
+            if after is None:
+                lim[f"{side}_dropped"] += 1
+            elif size_after < q0.size:
+                lim[f"{side}_cut"] += 1
+        lim["quotes"] += 1
+        quotes.append((row.ts_ms, vega_state["net"], q0.size, q.bid_size, q.ask_size))
+        if q.bid is None and q.ask is None:
+            skips["limit"] += 1
             continue
         rng = (
             np.random.default_rng([sc.seed, int(row.trade_seq)])
@@ -236,7 +341,8 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
             else None
         )
         d = decide(row.instrument_name, row.direction, row.price_eth, row.amount_contracts,
-                   row.ts_ms, q.bid, q.ask, q.size, qbook, fcfg, sc.fill_sizing, rng)  # fmt: skip
+                   row.ts_ms, q.bid, q.ask, (q.bid_size, q.ask_size), qbook, fcfg,
+                   sc.fill_sizing, rng)  # fmt: skip
         if d is None:
             skips["no_cross"] += 1
             continue
@@ -246,12 +352,16 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
         signed = d.qty if d.our_side == "buy" else -d.qty
         net_before = vega_state["net"]
         vega_state["net"] += signed * row.vega_usd
+        odelta.invalidate()
         fills.append(
             {
                 **row._asdict(),
                 "bid": q.bid,
                 "ask": q.ask,
-                "quote_size": q.size,
+                "quote_size": q0.size,
+                "bid_size": q.bid_size,
+                "ask_size": q.ask_size,
+                "pos_before": pos_before,
                 "sigma_center": q.sigma_center,
                 "skew_volpts": q.skew_volpts,
                 "skew_capped": q.skew_capped,
@@ -266,9 +376,8 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
                 "reason": d.reason,
             }
         )
-    while pos < len(ev):
-        handle(ev[pos])
-        pos += 1
+        hedge_check(row.ts_ms)  # quote and fill -> hedge
+    advance(np.iinfo("int64").max)
     acct.audit()
 
     fills_df = pd.DataFrame(fills)
@@ -277,4 +386,18 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
         if bad.any():
             raise AssertionError(f"{int(bad.sum())} fills without a reason")
     ledger = pd.DataFrame(acct.ledger, columns=["ts_ms", "kind", "ref", "eth"])
-    return SimResult(fills_df, ledger, pd.DataFrame(daily), skips, acct, pauses)
+    hedge_cols = ["decide_ms", "exec_ms", "wait_ms", "delta_before", "index_at_decision",
+                  "dq_usd", "q_before_usd", "q_after_usd", "print_usd", "exec_usd", "fee_eth",
+                  "slippage_eth"]  # fmt: skip
+    return SimResult(
+        fills_df,
+        ledger,
+        pd.DataFrame(daily),
+        skips,
+        acct,
+        pauses,
+        pd.DataFrame(hedges, columns=hedge_cols),
+        pd.DataFrame({"ts_ms": np.array(d_ts, "int64"), "delta_eth": np.array(d_val)}),
+        pd.DataFrame(quotes, columns=["ts_ms", "net_vega_usd", "size", "bid_size", "ask_size"]),
+        lim,
+    )

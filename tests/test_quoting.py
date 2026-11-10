@@ -25,9 +25,10 @@ F, VOL, T30 = 3300.0, 0.70, 30 / 365
 CFG = load_config(__import__("pathlib").Path(__file__).parents[1] / "config" / "base.yaml")
 
 
-def q(cfg, k=3300.0, t=T30, call=True, nv=0.0, sigma=VOL, **upd):
+def q(cfg, k=3300.0, t=T30, call=True, nv=0.0, sigma=VOL, vref=None, **upd):
     qc = cfg.quoting.model_copy(update=upd)
-    return make_quote(sigma, F, k, t, call, nv, qc, cfg.specs.option)
+    vref = cfg.risk.vega_limit_usd if vref is None else vref
+    return make_quote(sigma, F, k, t, call, nv, qc, cfg.specs.option, vref)
 
 
 def on_grid(p, spec):
@@ -105,7 +106,7 @@ def test_skew_moves_both_quotes_against_inventory(cfg, nv, sign):
 
 
 def test_skew_is_kappa_times_vega_ratio(cfg):
-    r = q(cfg, nv=2500.0, kappa_volpts=1.0, vega_ref_usd=5000.0)
+    r = q(cfg, nv=2500.0, kappa_volpts=1.0, vref=5000.0)
     assert r.sigma_center == pytest.approx(VOL - 0.005)
     assert r.skew_volpts == pytest.approx(-0.5) and not r.skew_capped
 
@@ -113,8 +114,8 @@ def test_skew_is_kappa_times_vega_ratio(cfg):
 def test_stronger_kappa_shifts_more(cfg):
     # 0.2 vs 0.9 vol points: the gap (~0.0008 ETH) exceeds the 0.0005 tick, so rounding
     # cannot hide it (smaller skews can round to the same price)
-    weak = q(cfg, nv=5000.0, kappa_volpts=0.2)
-    strong = q(cfg, nv=5000.0, kappa_volpts=0.9)
+    weak = q(cfg, nv=5000.0, kappa_volpts=0.2, vref=5000.0)
+    strong = q(cfg, nv=5000.0, kappa_volpts=0.9, vref=5000.0)
     assert strong.ask < weak.ask and strong.bid < weak.bid
 
 
@@ -128,7 +129,7 @@ def test_skew_capped_at_half_spread_never_quotes_through_fair(cfg, nv):
     fair = price_eth(F, 3300.0, T30, VOL, True)
     assert r.skew_capped and abs(r.skew_volpts) == pytest.approx(1.0)
     assert r.bid <= fair + 1e-12 <= r.ask + 2e-12  # inner quote at most at fair
-    assert skew_volpts(nv, cfg.quoting.model_copy(update={"kappa_volpts": 2.0}))[1]
+    assert skew_volpts(nv, cfg.quoting.model_copy(update={"kappa_volpts": 2.0}), 2000.0)[1]
 
 
 # ---------------- sizing ----------------
@@ -159,8 +160,8 @@ def test_fixed_sizing(cfg):
 
 def test_spot_vega_uses_s_over_f(cfg):
     qc = cfg.quoting.model_copy(update={"max_contracts": 1000})
-    a = make_quote(VOL, F, 3300.0, T30, True, 0.0, qc, cfg.specs.option, index_usd=F)
-    b = make_quote(VOL, F, 3300.0, T30, True, 0.0, qc, cfg.specs.option, index_usd=F / 2)
+    a = make_quote(VOL, F, 3300.0, T30, True, 0.0, qc, cfg.specs.option, 2000.0, index_usd=F)
+    b = make_quote(VOL, F, 3300.0, T30, True, 0.0, qc, cfg.specs.option, 2000.0, F / 2)
     assert b.size == math.floor(50.0 / (vega(F, 3300.0, T30, VOL) / 2))
     assert b.size > a.size
 

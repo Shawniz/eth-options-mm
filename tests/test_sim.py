@@ -156,7 +156,9 @@ def _t(ts) -> float:
 
 def _quote(cfg, ts, nv=0.0):
     """The quote the engine should post on INST at ts, given net book vega nv."""
-    return make_quote(VOL, S, 3000.0, _t(ts), True, nv, cfg.quoting, cfg.specs.option, S)
+    return make_quote(
+        VOL, S, 3000.0, _t(ts), True, nv, cfg.quoting, cfg.specs.option, cfg.risk.vega_limit_usd, S
+    )
 
 
 def _with_quoting(cfg, **upd):
@@ -203,6 +205,8 @@ def _market(cfg, vol=VOL, extra_refit_skip=()):
 
 
 def _trades(rows):
+    if not rows:  # an empty frame with the right columns
+        return _trades([("2025-01-06 00:00", "sell", 0.01, 1)]).iloc[:0]
     out = []
     for n, (ts, direction, px, qty) in enumerate(rows):
         ts = pd.Timestamp(ts, tz="UTC")
@@ -226,7 +230,24 @@ def _trades(rows):
     return pd.DataFrame(out)
 
 
-def _inputs(cfg, trades, book, curve, delivery=3300.0, activity=None):
+def _perp(rows):
+    """rows: (ts, taker direction, price); index = mark = price."""
+    return pd.DataFrame(
+        {
+            "ts_ms": [_ms1(t) for t, _, _ in rows],
+            "direction": [d for _, d, _ in rows],
+            "price_usd": [p for *_, p in rows],
+            "mark_price_usd": [p for *_, p in rows],
+            "index_price_usd": [p for *_, p in rows],
+        }
+    )
+
+
+def _with(cfg, section, **upd):
+    return cfg.model_copy(update={section: getattr(cfg, section).model_copy(update=upd)})
+
+
+def _inputs(cfg, trades, book, curve, delivery=3300.0, activity=None, perp=None):
     return SimInputs(
         trades=fair_values(trades, book, curve, cfg.sim.latency_ms),
         book=book,
@@ -236,6 +257,7 @@ def _inputs(cfg, trades, book, curve, delivery=3300.0, activity=None):
         activity_ms=np.array([], "int64") if activity is None else activity,
         start_ms=_ms1(START),
         end_ms=_ms1(END),
+        perp=perp,
     )
 
 
@@ -350,9 +372,109 @@ def test_long_vega_book_lowers_both_quotes(cfg):
     t1, t2 = "2025-01-06 12:00:30", "2025-01-06 12:01:30"
     tr = _trades([(t1, "sell", 0.0001, 4), (t2, "buy", 0.5, 2)])
     flat = run(_inputs(cfg, tr, book, curve), _with_quoting(cfg, kappa_volpts=0.0)).fills
-    skc = _with_quoting(cfg, kappa_volpts=1.0, vega_ref_usd=1.0)
+    skc = _with_quoting(cfg, kappa_volpts=1000.0)  # ~2.4 / 2000 x 1000 = 1.2 > h: capped
     sk = run(_inputs(cfg, tr, book, curve), skc).fills
     assert sk["ask"].iloc[1] < flat["ask"].iloc[1] and sk["bid"].iloc[1] < flat["bid"].iloc[1]
     assert sk["skew_capped"].iloc[1] and sk["skew_volpts"].iloc[1] == pytest.approx(-1.0)
     expected = _quote(skc, t2, nv=sk["net_vega_usd"].iloc[1])
     assert sk["ask"].iloc[1] == pytest.approx(expected.ask)
+
+
+# ---------------- Phase 6: hedging and limits in the loop ----------------
+
+
+def test_hedge_executes_at_the_next_same_side_print_after_latency(cfg):
+    book, curve = _market(cfg)
+    cfg1 = _with(cfg, "sim", latency_ms=1000)
+    perp = _perp([
+        ("2025-01-06 12:00:00", "buy", 3000.0),  # trigger: 50 ETH collateral, delta 50
+        ("2025-01-06 12:00:00.5", "sell", 3001.0),  # too early (latency 1 s)
+        ("2025-01-06 12:00:01.5", "buy", 3005.0),  # wrong side: a sell hedge gets the bid
+        ("2025-01-06 12:00:02", "sell", 3010.0),  # executes here
+    ])  # fmt: skip
+    res = run(_inputs(cfg1, _trades([]), book, curve, perp=perp), cfg1)
+    h = res.hedges.iloc[0]
+    assert len(res.hedges) == 1
+    assert h.exec_ms == _ms1("2025-01-06 12:00:02") and h.dq_usd == -150_000.0
+    px = 3010.0 * (1 - 1e-4)
+    assert h.exec_usd == pytest.approx(px)
+    assert h.fee_eth == pytest.approx(0.0005 * 150_000 / px)
+    assert res.account.perp_usd == -150_000.0 and res.account.perp_entry == pytest.approx(px)
+    assert res.ledger.query("kind == 'perp_fee'")["eth"].sum() == pytest.approx(-h.fee_eth)
+
+
+def test_zero_latency_hedge_never_trades_at_the_trigger_print(cfg):
+    book, curve = _market(cfg)
+    perp = _perp([("2025-01-06 12:00:00", "sell", 3000.0), ("2025-01-06 12:00:00", "sell", 2999.0)])
+    res = run(_inputs(cfg, _trades([]), book, curve, perp=perp), cfg)
+    assert res.hedges["print_usd"].tolist() == [2999.0]
+
+
+def test_no_hedge_inside_the_band(cfg):
+    book, curve = _market(cfg)
+    c = _with(cfg, "sim", initial_eth=4.0)
+    perp = _perp([("2025-01-06 12:00:00", "sell", 3000.0), ("2025-01-06 12:00:01", "sell", 3000.0)])
+    res = run(_inputs(c, _trades([]), book, curve, perp=perp), c)
+    assert res.hedges.empty and (res.delta["delta_eth"] == 4.0).all()
+
+
+def test_delta_stays_in_band_through_a_synthetic_crash(cfg):
+    # sell 50 ATM calls with quiet prints around them, then S falls 3000 -> 2400 over
+    # 2,000 prints with alternating taker sides
+    book, curve = _market(cfg)
+    sells = [(f"2025-01-06 12:0{m}:30", "buy", 0.5, 100) for m in range(4)]
+    t0 = pd.Timestamp("2025-01-06 11:59", tz="UTC")
+    rows = [(t0 + pd.Timedelta(seconds=5 * i), "buy" if i % 2 else "sell", 3000.0)
+            for i in range(720)]  # fmt: skip
+    crash = pd.Timestamp("2025-01-06 13:00", tz="UTC")
+    rows += [
+        (crash + pd.Timedelta(seconds=3.6 * i), "buy" if i % 2 else "sell", 3000.0 - 0.3 * i)
+        for i in range(2001)
+    ]  # fmt: skip
+    res = run(_inputs(cfg, _trades(sells), book, curve, perp=_perp(rows)), cfg)
+    assert res.account.positions == {}  # settled at expiry
+    assert res.fills["qty"].sum() == pytest.approx(50.0)
+    band = cfg.hedging.delta_band_eth
+    d = res.delta[res.delta["ts_ms"] >= _ms1(crash)]["delta_eth"].abs()
+    in_crash = res.hedges[res.hedges["decide_ms"] >= _ms1(crash)]
+    assert len(in_crash) >= 3  # the crash forced several hedges
+    assert (d <= band).mean() > 0.99
+    assert d.max() < band + 0.1  # breaches are caught at the next print
+    assert (res.hedges["delta_before"].abs() > band).all()
+    assert (in_crash["wait_ms"] <= 7_200).all()  # next same-side print (every 7.2 s)
+
+
+def test_vega_limit_cuts_then_removes_the_bid(cfg):
+    book, curve = _market(cfg)
+    c = _with(cfg, "risk", vega_limit_usd=3.0)  # ~2.5 contracts of this option
+    tr = _trades([(f"2025-01-06 12:0{m}:30", "sell", 0.0001, 4) for m in range(3)])
+    inp = _inputs(c, tr, book, curve)
+    res = run(inp, c)
+    v = inp.trades["vega_usd"].iloc[0]
+    assert res.fills["bid_size"].tolist() == [2.0, 1.0]  # floor(3/v)=2, floor((3-v)/v)=1
+    assert res.fills["qty"].tolist() == [1.0, 0.5]
+    assert res.limits["bid_dropped"] == 1 and res.limits["bid_cut"] == 2
+    last = res.quotes.iloc[-1]
+    assert last.bid_size == 0.0 and last.ask_size > 0  # only the risk-reducing side left
+    assert 1.5 * v <= c.risk.vega_limit_usd
+
+
+def test_book_delta_matches_bump_and_revalue_on_a_flat_smile(cfg):
+    # flat smile: no smile delta, so Black delta = dW/dS by revaluation
+    from mm.sim.delta import OptionDelta, option_value_eth
+    from mm.sim.engine import _Meta
+
+    book, curve = _market(cfg)
+    acct = Account(3.0)
+    acct.option_fill(0, INST, "sell", 7.0, 0.05, 0.0)
+    acct.option_fill(0, "ETH-10JAN25-3300-P", "buy", 4.0, 0.08, 0.0)
+    ts = _ms1("2025-01-07 12:00")
+    od = OptionDelta(book, curve, _Meta())
+    s = 3100.0
+
+    def w(x):
+        return x * (acct.eth + option_value_eth(od, acct, ts, x))
+
+    bump = (w(s + 0.5) - w(s - 0.5)) / 1.0
+    assert acct.eth + od.total(acct, ts, s) == pytest.approx(bump, rel=1e-6)
+    assert od.n_missing == 0

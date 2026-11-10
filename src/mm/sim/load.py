@@ -38,7 +38,13 @@ def load_inputs(cfg: Config, start: pd.Timestamp, end: pd.Timestamp) -> SimInput
         f"where available_at >= timestamp '{s}' and available_at < timestamp '{e}'"
     ).df()
     fund["available_ms"] = _ms(fund["available_at"])
-    log.info("trades %d, refits in window %d", len(trades), int(win.sum()))
+    perp = con.execute(
+        f"select ts, direction, price_usd, mark_price_usd, index_price_usd from perp_trades "
+        f"where {rng} order by ts, trade_seq"
+    ).df()
+    perp["ts_ms"] = _ms(perp.pop("ts"))
+    log.info("trades %d, perp prints %d, refits in window %d", len(trades), len(perp),
+             int(win.sum()))  # fmt: skip
     return SimInputs(
         trades=fair_values(trades, book, curve, cfg.sim.latency_ms),
         book=book,
@@ -48,4 +54,5 @@ def load_inputs(cfg: Config, start: pd.Timestamp, end: pd.Timestamp) -> SimInput
         activity_ms=curve.activity_ms,
         start_ms=int(start.value // 10**6),
         end_ms=int(end.value // 10**6),
+        perp=perp,
     )
