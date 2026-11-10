@@ -97,7 +97,7 @@ Most bugs here will be silent unit errors.
 - Price off the **forward** F for each expiry using **Black-76, undiscounted**. F = basis × latest index, where basis = mark/index of the matching dated future; for expiries without a future, ln(basis) is interpolated linearly in T between the futures (put-call parity was tested and rejected; decision D017):
   `C = F·N(d1) − K·N(d2)`, `d1 = [ln(F/K) + ½σ²T] / (σ√T)`, `d2 = d1 − σ√T`.
 - **ETH premium = C / F.** (USD discounting is absorbed into F; ETH discounting ≈ 0 on Deribit.) Verify against Deribit mark prices.
-- The per-option hedge delta is the **smile-adjusted** delta consistent with the sticky-moneyness surface: `N(d1) − φ(d1)·√T·∂σ/∂k` (Black delta plus vega·dσ/dS; D038). Do **not** apply an F/S factor for Deribit's coin-settled options.
+- Black delta `N(d1)` is the per-option hedge delta. Deribit marks move close to sticky strike over the hours a hedge is held (D040), where Black delta is right (D041). The sticky-moneyness delta `N(d1) − φ(d1)·√T·∂σ/∂k` (D038) is kept as `hedging.delta: smile`. Do **not** apply an F/S factor for Deribit's coin-settled options.
 - Use Black delta (not premium-adjusted) to locate 25-delta strikes.
 - In code, convert price amounts to vol by exact re-pricing (solve P(σ+δσ) = P(σ) + δP), not the vega approximation.
 
@@ -106,7 +106,7 @@ Most bugs here will be silent unit errors.
 The account holds: ETH balance `B` (collateral, premiums, fees, funding, settled P&L), options `n_i`, and an inverse perpetual with USD notional `Q` entered at `P0`.
 
 - USD value: `W = S·B + Σ n_i·(C_i/F_i)·S + Q·(1/P0 − 1/P)·S`
-- **Account delta (USD per $1 move in ETH):** `Δ_USD = B + Σ n_i·δ_i + Q/P0`, δ_i the smile-adjusted delta above (D038)
+- **Account delta (USD per $1 move in ETH):** `Δ_USD = B + Σ n_i·N(d1_i) + Q/P0` (D041)
 - **Hedge trade:** `ΔQ = −S·Δ_USD` (USD notional), converted to perpetual contracts using the contract size from specs, rounded to whole contracts.
 - The premium adjustment happens automatically because premiums flow through `B`. Never also subtract premium from option deltas (no double counting).
 - Unit test: when perpetual P&L is settled into `B` and `P0` resets, total delta is unchanged.

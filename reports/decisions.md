@@ -435,3 +435,21 @@ Each entry: the choice, the alternative, why, and the parameter's category:
     1. revert to Black delta (β = 1);
     2. a β-weighted delta, N(d1) − φ(d1)·√T·(σ′(k) − β·σ′(0)), with β from this training-period table;
     3. keep D038.
+
+## D041 — Back to Black delta for hedging (reverses D038)
+- **Category:** from data (owner decision, 2026-11-10)
+- **Choice:** `hedging.delta: black`. The per-option hedge delta is N(d1) (N(d1) − 1 for puts), and markouts are hedged with the same delta. The D038 sticky-moneyness delta stays available as `hedging.delta: smile`.
+- **Alternatives:**
+  - keep D038 (sticky moneyness, β = 0);
+  - a β-weighted delta, N(d1) − φ(d1)·√T·(σ′(k) − β·σ′(0)), with β estimated on the training period.
+- **Why:**
+  - D040 measured how Deribit's marks move. Over the horizons a hedge is held, ATM vol moves along the old smile as sticky strike predicts: β ≈ 0.98 at 1 h and 1.56 at 4 h (8–35 d expiries). Under sticky strike Black delta is the right hedge, and D038's correction pushes it the wrong way.
+  - D038 had been chosen for consistency with how Surface A is stored (moneyness), not from evidence about the market.
+  - The β-weighted delta with β ≈ 1 is almost the same as Black and adds a fitted parameter.
+- **Not changed:** valuation between refits is still sticky moneyness (D029). The surface is refitted to marks every 5 minutes, so over longer horizons the market's own behaviour takes over.
+- **Effect** (smile delta → Black delta, reruns of both periods):
+  - 6–12 Jan: hedges 1,226 → 1,015, perp fees −$11.7k → −$9.6k, delta line +$0.1k → −$1.9k, total −$20.7k → **−$20.0k**.
+  - 27 Jan – 10 Feb: hedges 3,497 → 2,868, perp fees −$28.9k → −$23.3k, delta line −$2.4k → −$8.6k, total −$127.6k → **−$126.5k**.
+  - Residual $0.0000 on both; 20/20 hand-checked fills on both.
+  - The delta line worsens because the attribution values the book sticky-moneyness between refits (D029), so it sees the smile delta that Black leaves unhedged. Within a refit that is the known inconsistency; it costs less than the extra hedging it saves.
+  - The stress loss is adverse selection (D037, D039) and barely moves.

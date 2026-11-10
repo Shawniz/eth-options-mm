@@ -122,7 +122,7 @@ def test_one_fill_no_market_move_spread_capture_equals_edge_equals_markout(cfg):
                                                           0.0001, 4)]))  # fmt: skip
     edge_usd = res.fills["edge_eth"].iloc[0] * S
     assert att.rows["spread_capture"].sum() == pytest.approx(edge_usd, rel=1e-9)
-    mk = markouts(res.fills, md, inp.end_ms)
+    mk = markouts(res.fills, md, inp.end_ms, cfg.hedging.delta)
     assert mk["hedged_0"].iloc[0] == pytest.approx(edge_usd, rel=1e-9)
     assert mk["raw_0"].iloc[0] == pytest.approx(edge_usd, rel=1e-9)
     # after 1 minute only time has passed: markout = edge + 1 minute of theta
@@ -170,7 +170,7 @@ def test_markout_uses_only_the_future_it_names(cfg):
     # the surface jumps +5 vol points at 12:30: a 12:00:30 fill sees it at 1 h, not 5 min
     trades = _trades([("2025-01-06 12:00:30", "sell", 0.0001, 4)])
     inp, res, att, md = _run_and_attribute(cfg, trades, vol_after=("2025-01-06 12:30", 0.65))
-    mk = markouts(res.fills, md, inp.end_ms)
+    mk = markouts(res.fills, md, inp.end_ms, cfg.hedging.delta)
     v = 2.0 * float(b_vega(S, 3000.0, _t(_ms1("2025-01-06 13:00")), VOL))
     assert mk["hedged_5min"].iloc[0] - mk["hedged_0"].iloc[0] < 0.05 * v  # theta only
     assert mk["hedged_1h"].iloc[0] - mk["hedged_0"].iloc[0] > 4 * v  # ~ +5 vol points

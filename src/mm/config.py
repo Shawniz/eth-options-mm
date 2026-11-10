@@ -177,7 +177,7 @@ class QuotingConfig(_Strict):
 
 
 class HedgingConfig(_Strict):
-    delta: Literal["smile", "black"] = "smile"  # D038
+    delta: Literal["smile", "black"] = "black"  # D041 (smile: D038)
     delta_band_eth: float = Field(gt=0)
     hedge_cost_bps: float = Field(ge=0)
 

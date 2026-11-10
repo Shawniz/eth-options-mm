@@ -116,8 +116,9 @@ hedging:                       # Phase 6 (decisions D034, D036)
   # |account delta| > band -> hedge back to zero with the perpetual as a taker. The order
   # fills at the first same-side perp print strictly after the trigger with
   # ts >= trigger + latency, at that print x (1 +- hedge_cost_bps), plus the taker fee.
-  delta: smile                 # smile: N(d1) - phi(d1) sqrt(T) dsigma/dk, consistent with the
-                               # sticky-moneyness surface (D038); black: N(d1) only
+  delta: black                 # black: N(d1). The market moves close to sticky strike over
+                               # the hours a hedge is held (D040), where Black delta is right
+                               # (D041). smile: N(d1) - phi(d1) sqrt(T) dsigma/dk (D038)
   delta_band_eth: 5.0          # free choice (~$16k); hedge count vs carried delta
   hedge_cost_bps: 1.0          # size impact on top of the real spread (hedges > 98% of prints)
 

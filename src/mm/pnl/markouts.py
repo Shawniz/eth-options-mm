@@ -4,9 +4,10 @@ The fill's own contribution to the USD account is W_f(t') = side q S(t') (fair(t
 we paid (or received) p ETH, whose USD value also moves with S. So
     raw(h)    = side q [ S(t+h) fair(t+h) - S(t+h) p ]
     hedged(h) = raw(h) - side q (delta - p) (S(t+h) - S(t))
-with delta the smile-adjusted delta at the fill (D038); delta - p is the fill's account
-delta (the premium sits in B). At h = 0 both equal the spread capture. fair is Surface A
-on the inclusive state (D039). A horizon past expiry or past the data end is NaN.
+with delta the hedger's own delta at the fill (config hedging.delta: Black, D041);
+delta - p is the fill's account delta (the premium sits in B). At h = 0 both equal the
+spread capture. fair is Surface A on the inclusive state (D039). A horizon past expiry
+or past the data end is NaN.
 Also reported per $ of vega: markout / (q x vega_usd) is in vol points.
 """
 
@@ -27,7 +28,7 @@ def _one(name: str) -> Book:
                 np.array([float(i.strike_usd)]), np.array([i.option_type == "P"]))  # fmt: skip
 
 
-def markouts(fills: pd.DataFrame, md: MarketData, end_ms: int) -> pd.DataFrame:
+def markouts(fills: pd.DataFrame, md: MarketData, end_ms: int, delta_mode: str = "black"):
     if fills.empty:
         return pd.DataFrame()
     books = {n: _one(n) for n in fills["instrument_name"].unique()}
@@ -49,7 +50,7 @@ def markouts(fills: pd.DataFrame, md: MarketData, end_ms: int) -> pd.DataFrame:
         bk = books[name]
         m = md.at(int(t), bk)
         s0[i] = m.s
-        d0[i] = smile_delta_per_contract(bk, m)[0]
+        d0[i] = smile_delta_per_contract(bk, m, delta_mode)[0]
     out["delta"] = d0
     for lab, h in HORIZONS.items():
         raw = np.full(len(ts), np.nan)

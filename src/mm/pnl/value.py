@@ -86,8 +86,9 @@ def delta_eth(bk: Book, mk: Market, rel: float = 1e-4) -> float:
     return (up - dn) / (2 * h)
 
 
-def smile_delta_per_contract(bk: Book, mk: Market) -> np.ndarray:
-    """N(d1) [-1 puts] - phi(d1) sqrt(T) sigma'(k) (D038), per instrument."""
+def smile_delta_per_contract(bk: Book, mk: Market, mode: str = "smile") -> np.ndarray:
+    """Per-instrument hedge delta: N(d1) [-1 puts], minus phi(d1) sqrt(T) sigma'(k) when
+    mode = "smile" (D038). The hedger's mode is config hedging.delta (D041)."""
     f = mk.basis * mk.s
     a, b, rho, m, s, tref = mk.par.T
     x = np.log(bk.k / f) - m
@@ -96,6 +97,8 @@ def smile_delta_per_contract(bk: Book, mk: Market) -> np.ndarray:
     t = np.maximum((bk.exp - mk.ts) / MS_PER_YEAR, 1e-12)
     sd = sig * np.sqrt(t)
     d1 = (np.log(f / bk.k) + 0.5 * sd * sd) / sd
+    if mode == "black":
+        return ndtr(d1) - bk.put
     dsig = b * (rho + x / r) / (2.0 * sig * tref)
     return ndtr(d1) - bk.put - np.exp(-0.5 * d1 * d1) / np.sqrt(2 * np.pi) * np.sqrt(t) * dsig
 

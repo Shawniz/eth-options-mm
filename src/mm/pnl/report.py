@@ -142,7 +142,7 @@ def build(cfg: Config, run: str):
                     for x in ("fills", "hedges", "ledger", "daily"))  # fmt: skip
     md = MarketData(inp.book, inp.curve, inp.perp)
     att = attribute(f, h, led, d, md, cfg.sim.initial_eth, inp.start_ms, inp.end_ms)
-    mk = markouts(f, md, inp.end_ms)
+    mk = markouts(f, md, inp.end_ms, cfg.hedging.delta)
     att.rows.to_parquet(run_dir / "attribution.parquet", index=False)
     mk.to_parquet(run_dir / "markouts.parquet", index=False)
     return inp, f, h, att, mk
