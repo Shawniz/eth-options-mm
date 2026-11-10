@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from mm.pricing.black76 import vega
+from mm.pricing.black76 import gamma, vega
 
 
 def book_vega_usd(n, f, k, t, sigma, s) -> float:
@@ -14,6 +14,18 @@ def book_vega_usd(n, f, k, t, sigma, s) -> float:
     n, f, s = (np.asarray(v, dtype=float) for v in (n, f, s))
     v = np.asarray(vega(f, k, t, sigma), dtype=float) * s / f
     return float(np.nansum(n * v))
+
+
+def gamma1_usd(f, k, t, sigma, s):
+    """Cash gamma per contract: USD gamma P&L of a 1% move in ETH, 1/2 G_S (0.01 S)^2.
+    The account holds n (C/F) S with F = b S, so d2W/dS2 = n b Gamma_Black(F)."""
+    f, s = np.asarray(f, dtype=float), np.asarray(s, dtype=float)
+    return 0.5 * (f / s) * np.asarray(gamma(f, k, t, sigma), dtype=float) * (0.01 * s) ** 2
+
+
+def book_gamma1_usd(n, f, k, t, sigma, s) -> float:
+    """sum n_i x cash gamma_i (USD per 1% move squared); unvalued positions count 0."""
+    return float(np.nansum(np.asarray(n, dtype=float) * gamma1_usd(f, k, t, sigma, s)))
 
 
 def perp_value_eth(q_usd: float, p0: float, p: float) -> float:

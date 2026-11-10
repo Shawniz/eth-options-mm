@@ -23,7 +23,7 @@ from pathlib import Path
 import pandas as pd
 
 from mm.config import Config, load_config
-from mm.data.db import connect
+from mm.data.db import TRADE_NO, TRADE_ORDER, connect
 from mm.pricing.forwards import ForwardCurve, future_basis_obs, parity_basis_obs
 from mm.pricing.iv import implied_vol
 
@@ -34,8 +34,12 @@ CACHE_NAME = "option_trades_priced"
 def index_series(frames: list[pd.DataFrame]) -> pd.DataFrame:
     """One index series from every trade stream (each trade carries the index at its
     instant), so the latest index before any t is as fresh as the data allows."""
-    s = pd.concat([f[["ts", "index_price_usd"]] for f in frames], ignore_index=True)
-    return s.dropna().sort_values("ts", kind="stable").reset_index(drop=True)
+    cols = ["ts", "index_price_usd"] + (
+        ["trade_no"] if all("trade_no" in f for f in frames) else []
+    )
+    s = pd.concat([f[cols] for f in frames], ignore_index=True).dropna()
+    keys = ["ts", "trade_no"] if "trade_no" in cols else ["ts"]  # exchange order (D044)
+    return s.sort_values(keys, kind="stable")[["ts", "index_price_usd"]].reset_index(drop=True)
 
 
 def build_curve(cfg: Config, start=None, end=None) -> ForwardCurve:
@@ -45,14 +49,17 @@ def build_curve(cfg: Config, start=None, end=None) -> ForwardCurve:
     e = str(end or cfg.study_period.end)
     # A day of warm-up before the start so the first trades have a basis.
     rng = f"ts >= timestamp '{s}' - interval 1 day and ts < timestamp '{e}'"
-    index = con.execute(f"select ts, index_price_usd from perp_trades where {rng} order by ts").df()
+    index = con.execute(
+        f"select ts, index_price_usd, {TRADE_NO} trade_no from perp_trades where {rng} "
+        f"order by {TRADE_ORDER}"
+    ).df()
     fut = con.execute(
-        f"select ts, instrument_name, expiry, mark_price_usd, index_price_usd "
-        f"from future_trades where {rng} order by ts"
+        f"select ts, instrument_name, expiry, mark_price_usd, index_price_usd, {TRADE_NO} "
+        f"trade_no from future_trades where {rng} order by {TRADE_ORDER}"
     ).df()
     opt = con.execute(
-        f"select ts, expiry, strike_usd, option_type, mark_price_eth, index_price_usd "
-        f"from option_trades where {rng} order by ts"
+        f"select ts, expiry, strike_usd, option_type, mark_price_eth, index_price_usd, "
+        f"{TRADE_NO} trade_no from option_trades where {rng} order by {TRADE_ORDER}"
     ).df()
     fcfg = cfg.pricing.forwards
     log.info("index %d, futures %d, option rows for parity %d", len(index), len(fut), len(opt))
@@ -92,7 +99,8 @@ def enrich(cfg: Config) -> Path:
     for (d,) in days:
         day = pd.Timestamp(d).date()
         trades = con.execute(
-            f"select * exclude (date) from option_trades where date = '{day}' order by ts"
+            f"select * exclude (date) from option_trades where date = '{day}' "
+            f"order by {TRADE_ORDER}"
         ).df()
         priced = price_trades(trades, curve, cfg.sim.latency_ms)
         p = out_dir / f"date={day}" / "part.parquet"

@@ -111,7 +111,7 @@ class MarketData:
         p = perp if perp is not None else pd.DataFrame(columns=["ts_ms", "mark_price_usd"])
         self._p_ts = p["ts_ms"].to_numpy("int64")
         self._p_mark = p["mark_price_usd"].to_numpy(float)
-        self._basis: dict[tuple[int, int], float] = {}
+        self._basis: dict[int, tuple[np.ndarray, np.ndarray]] = {}  # exp -> (ts, basis)
         self._slice: dict[tuple[int, int], np.ndarray] = {}
 
     def preload_basis(self, ts_ms: np.ndarray, exp_ms: np.ndarray) -> None:
@@ -121,19 +121,44 @@ class MarketData:
         self.preload_pairs(tt, ee)
 
     def preload_pairs(self, tt: np.ndarray, ee: np.ndarray) -> None:
+        """Basis for (time, expiry) pairs, one vectorised forward-curve call; stored as a
+        sorted array per expiry (a dict per pair would not fit in memory over months)."""
         tt, ee = np.asarray(tt, "int64"), np.asarray(ee, "int64")
-        keep = np.array([(int(a), int(b)) not in self._basis for a, b in zip(tt, ee, strict=True)])
-        tt, ee = tt[keep], ee[keep]
-        if not len(tt):
+        need_t, need_e = [], []
+        for e in np.unique(ee):
+            ts_e = np.unique(tt[ee == e])
+            have = self._basis.get(int(e))
+            if have is not None:
+                ts_e = ts_e[~np.isin(ts_e, have[0])]
+            need_t.append(ts_e)
+            need_e.append(np.full(len(ts_e), e, "int64"))
+        if not need_t or not sum(len(x) for x in need_t):
             return
+        t_all, e_all = np.concatenate(need_t), np.concatenate(need_e)
         fw = self.curve.forwards(
-            pd.Series(pd.to_datetime(tt, unit="ms", utc=True)),
-            pd.Series(pd.to_datetime(ee, unit="ms", utc=True)),
+            pd.Series(pd.to_datetime(t_all, unit="ms", utc=True)),
+            pd.Series(pd.to_datetime(e_all, unit="ms", utc=True)),
             0,
             inclusive=True,
         )
-        for a, b, v in zip(tt, ee, fw["basis"].to_numpy(), strict=True):
-            self._basis[(int(a), int(b))] = float(v)
+        b_all = fw["basis"].to_numpy(float)
+        for e in np.unique(e_all):
+            sel = e_all == e
+            t_new, b_new = t_all[sel], b_all[sel]
+            if int(e) in self._basis:
+                t_old, b_old = self._basis[int(e)]
+                t_new, b_new = np.r_[t_old, t_new], np.r_[b_old, b_new]
+            o = np.argsort(t_new, kind="stable")
+            self._basis[int(e)] = (t_new[o], b_new[o])
+
+    def basis(self, ts_ms: int, exp_ms: int) -> float:
+        have = self._basis.get(exp_ms)
+        if have is not None:
+            j = int(np.searchsorted(have[0], ts_ms))
+            if j < len(have[0]) and have[0][j] == ts_ms:
+                return float(have[1][j])
+        self.preload_pairs(np.array([ts_ms]), np.array([exp_ms]))
+        return self.basis(ts_ms, exp_ms)
 
     def index(self, ts_ms: int) -> float:
         return self.curve.index_at(int(ts_ms), inclusive=True)
@@ -162,10 +187,7 @@ class MarketData:
         par = np.empty((n, 6))
         for i in range(n):
             e = int(bk.exp[i])
-            key = (ts_ms, e)
-            if key not in self._basis:
-                self.preload_basis(np.array([ts_ms]), np.array([e]))
-            basis[i] = self._basis[key]
+            basis[i] = self.basis(ts_ms, e)
             par[i] = self._slice_par(e, refit)
         if prev is not None and len(prev.basis) == n:  # carry missing inputs forward
             basis = np.where(np.isfinite(basis), basis, prev.basis)

@@ -4,7 +4,8 @@
 
 For N random fills (seeded) it recomputes, with its own queries and formulas:
   refit used     latest refit <= t - latency (refits.parquet)
-  index          latest index on any stream strictly before t - latency (DuckDB)
+  index          latest index on any stream strictly before t - latency (DuckDB);
+                 same-millisecond ties: the higher global trade number
   forward        for expiries with a dated future: latest future mark/index before the
                  cutoff x index. Expiries without one (interpolated basis) use the run's
                  forward, which Phase 2 validated; the table says which.
@@ -15,8 +16,8 @@ For N random fills (seeded) it recomputes, with its own queries and formulas:
                  net_vega is taken from the fill log (it depends on the whole book's
                  history); everything downstream of it is recomputed.
   size           vega: floor(min(target / (Black vega x S/F), max)); fixed: fixed_contracts;
-                 then our side cut to the room under the vega and position limits, from the
-                 logged net vega and position before the fill
+                 then our side cut to the room under the vega, cash-gamma and position limits,
+                 from the logged net vega, net gamma and position before the fill
   fill           strict rule, size min(trade, quote) x fraction, maker fee with cap
 Writes reports/phase5_handcheck.md (--out).
 """
@@ -78,22 +79,23 @@ def check(cfg, run: str, n: int, seed: int) -> pd.DataFrame:
         exp = _expiry(r.instrument_name)
         exp_ms = int(exp.timestamp() * 1000)
         refit = int(refit_grid[np.searchsorted(refit_grid, cut, side="right") - 1])
+        # latest index on any stream; same-millisecond ties go to the higher Deribit trade
+        # number (one global sequence across instruments)
+        sub = " union all ".join(
+            f"select ts, index_price_usd, cast(split_part(trade_id, '-', 2) as bigint) no "
+            f"from {t} where ts < timestamp '{cut_s}' and ts > timestamp '{cut_s}' "
+            f"- interval 1 hour"
+            for t in ("perp_trades", "future_trades", "option_trades")
+        )
         idx = con.execute(
-            f"""select index_price_usd from (
-              select ts, index_price_usd from perp_trades where ts < timestamp '{cut_s}'
-                and ts > timestamp '{cut_s}' - interval 1 hour
-              union all select ts, index_price_usd from future_trades where ts < timestamp
-                '{cut_s}' and ts > timestamp '{cut_s}' - interval 1 hour
-              union all select ts, index_price_usd from option_trades where ts < timestamp
-                '{cut_s}' and ts > timestamp '{cut_s}' - interval 1 hour)
-            order by ts desc limit 1"""
+            f"select index_price_usd from ({sub}) order by ts desc, no desc limit 1"
         ).fetchone()[0]
         max_age = int(cfg.pricing.forwards.future_basis_max_age_s)
         fut = con.execute(
             f"""select mark_price_usd / index_price_usd from future_trades
             where expiry = timestamp '{exp:%Y-%m-%d %H:%M:%S}' and ts < timestamp '{cut_s}'
               and ts > timestamp '{cut_s}' - interval {max_age} second
-            order by ts desc, trade_seq desc limit 1"""
+            order by ts desc, cast(split_part(trade_id, '-', 2) as bigint) desc limit 1"""
         ).fetchone()  # fmt: skip
         if fut is not None:
             fwd, src = fut[0] * idx, "future"
@@ -117,12 +119,15 @@ def check(cfg, run: str, n: int, seed: int) -> pd.DataFrame:
         inc = spec.min_order_contracts
         base = math.floor(raw_size / inc + 1e-9) * inc
         rk = cfg.risk
+        gamma_i = 0.5 * norm.pdf(d1) / (fwd * sig * math.sqrt(t)) * fwd / idx * (0.01 * idx) ** 2
         if r.our_side == "buy":
             room = min(rk.max_position_contracts - r.pos_before,
-                       (rk.vega_limit_usd - r.net_vega_usd) / vega_i)  # fmt: skip
+                       (rk.vega_limit_usd - r.net_vega_usd) / vega_i,
+                       (rk.gamma_limit_usd - r.net_gamma1_usd) / gamma_i)  # fmt: skip
         else:
             room = min(rk.max_position_contracts + r.pos_before,
-                       (rk.vega_limit_usd + r.net_vega_usd) / vega_i)  # fmt: skip
+                       (rk.vega_limit_usd + r.net_vega_usd) / vega_i,
+                       (rk.gamma_limit_usd + r.net_gamma1_usd) / gamma_i)  # fmt: skip
         size = math.floor(min(base, room) / inc + 1e-9) * inc
         side_size = r.bid_size if r.our_side == "buy" else r.ask_size
         h = qc.half_spread_volpts / 100
@@ -146,19 +151,21 @@ def check(cfg, run: str, n: int, seed: int) -> pd.DataFrame:
         qty = min(r.amount_contracts, size) * fc.max_fill_fraction
         fee = qty * min(spec.maker_fee_eth_per_contract, spec.fee_cap_fraction_of_premium * our_px)
         sweep = abs(r.eligible - min(r.amount_contracts, size)) > 1e-9
-        ok = (
-            refit == r.refit_ms
-            and abs(idx - r.index_q) < 1e-9
-            and abs(fwd - r.forward_q) < 1e-6 * fwd
-            and in_univ
-            and abs(base - r.quote_size) < 1e-9
-            and abs(size - side_size) < 1e-9
-            and abs(sc - r.sigma_center) < 1e-9
-            and crosses
-            and abs(our_px - r.fill_price) < 1e-12
-            and (sweep or abs(qty - r.qty) < 1e-12)
-            and (sweep or abs(fee - r.fee_eth) < 1e-12)
-        )
+        conds = {
+            "refit": refit == r.refit_ms,
+            "index": abs(idx - r.index_q) < 1e-9,
+            "forward": abs(fwd - r.forward_q) < 1e-6 * fwd,
+            "universe": in_univ,
+            "base size": abs(base - r.quote_size) < 1e-9,
+            "limit size": abs(size - side_size) < 1e-9,
+            "centre vol": abs(sc - r.sigma_center) < 1e-9,
+            "crosses": crosses,
+            "price": abs(our_px - r.fill_price) < 1e-12,
+            "qty": sweep or abs(qty - r.qty) < 1e-12,
+            "fee": sweep or abs(fee - r.fee_eth) < 1e-12,
+        }
+        ok = all(conds.values())
+        failed = ", ".join(k for k, v in conds.items() if not v)
         rows.append(
             {
                 "time (UTC)": ts.strftime("%m-%d %H:%M:%S.%f")[:-3],
@@ -181,7 +188,7 @@ def check(cfg, run: str, n: int, seed: int) -> pd.DataFrame:
                 "qty (check/sim)": f"{qty:g}/{r.qty:g}" + (" sweep" if sweep else ""),
                 "fee (check)": fee,
                 "fee (sim)": r.fee_eth,
-                "ok": "✅" if ok else "❌",
+                "ok": "✅" if ok else f"❌ {failed}",
             }
         )
     return pd.DataFrame(rows)

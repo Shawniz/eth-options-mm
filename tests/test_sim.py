@@ -548,3 +548,18 @@ def test_latency_rule_holds_for_every_fill_and_hedge(cfg):
     assert len(res.fills) == 4 and len(res.hedges) > 3
     assert (res.fills["refit_ms"] <= res.fills["ts_ms"] - 5000).all()
     assert (res.hedges["exec_ms"] >= res.hedges["decide_ms"] + 5000).all()
+
+
+def test_gamma_limit_cuts_then_removes_the_ask(cfg):
+    # selling ATM 4-day calls adds short cash gamma (~$0.96 a contract); limit $1.5
+    book, curve = _market(cfg)
+    c = _with(cfg, "risk", gamma_limit_usd=1.5)
+    tr = _trades([(f"2025-01-06 12:0{m}:30", "buy", 0.5, 4) for m in range(3)])
+    inp = _inputs(c, tr, book, curve)
+    res = run(inp, c)
+    g = inp.trades["gamma1_usd"].iloc[0]
+    assert 0.9 < g < 1.0
+    assert res.fills["ask_size"].tolist() == [1.0, 1.0]  # floor(1.5/g), floor((1.5-g/2)/g)
+    assert res.fills["qty"].tolist() == [0.5, 0.5]
+    assert res.limits["ask_dropped"] == 1
+    assert res.fills["net_gamma1_usd"].iloc[1] == pytest.approx(-0.5 * g)

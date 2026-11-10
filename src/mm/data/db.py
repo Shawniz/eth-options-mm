@@ -15,6 +15,12 @@ import pandas as pd
 
 PARTITIONED = ("option_trades", "perp_trades", "future_trades", "dvol", "funding")
 
+# Exchange order for trades. Deribit trade ids ("ETH-228806649") are one global sequence
+# across all instruments, so (ts, trade number) orders trades within one stream and across
+# streams; ordering by ts alone leaves same-millisecond ties in an undefined order (D044).
+TRADE_NO = "cast(split_part(trade_id, '-', 2) as bigint)"
+TRADE_ORDER = f"ts, {TRADE_NO}"
+
 
 def connect(clean_dir: str | Path, database: str = ":memory:") -> duckdb.DuckDBPyConnection:
     clean_dir = Path(clean_dir)

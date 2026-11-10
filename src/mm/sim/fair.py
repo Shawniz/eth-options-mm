@@ -19,6 +19,7 @@ import pandas as pd
 from mm.pricing.black76 import price_eth, vega
 from mm.pricing.forwards import ForwardCurve
 from mm.quoting.quoter import otm_delta
+from mm.risk.greeks import gamma1_usd
 
 LIVE = ("full", "carry")
 RAW = ["a", "b", "rho", "m", "s"]
@@ -64,7 +65,8 @@ def fair_values(
 ) -> pd.DataFrame:
     """trades: ts, expiry, strike_usd, option_type, t_years. Adds refit_ms, fit_kind,
     forward_q, index_q, sigma_fair, fair_eth, otm_delta and vega_usd (Black vega x S/F,
-    USD per vol point per contract); NaN where there is no surface/forward."""
+    USD per vol point per contract) and gamma1_usd (cash gamma per 1% move, D043); NaN
+    where there is no surface/forward."""
     out = trades.reset_index(drop=True).copy()
     ts_ms = _ms(out["ts"])
     out["ts_ms"] = ts_ms
@@ -94,4 +96,5 @@ def fair_values(
     sig = out["sigma_fair"].to_numpy()
     out["otm_delta"] = otm_delta(f, k_usd, t, sig)
     out["vega_usd"] = np.asarray(vega(f, k_usd, t, sig)) * out["index_q"].to_numpy() / f
+    out["gamma1_usd"] = gamma1_usd(f, k_usd, t, sig, out["index_q"].to_numpy())  # D043
     return out

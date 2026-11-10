@@ -184,6 +184,7 @@ class HedgingConfig(_Strict):
 
 class RiskConfig(_Strict):
     vega_limit_usd: float = Field(gt=0)
+    gamma_limit_usd: float = Field(gt=0)  # |net cash gamma|, USD per 1% move squared (D043)
     max_position_contracts: float = Field(gt=0)
 
 

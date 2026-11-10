@@ -7,7 +7,7 @@ import logging
 import pandas as pd
 
 from mm.config import Config
-from mm.data.db import connect
+from mm.data.db import TRADE_ORDER, connect
 from mm.pricing.enrich import build_curve
 from mm.sim.engine import SimInputs
 from mm.sim.fair import SurfaceBook, _ms, fair_values
@@ -25,7 +25,7 @@ def load_inputs(cfg: Config, start: pd.Timestamp, end: pd.Timestamp) -> SimInput
     s, e = start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
     rng = f"ts >= timestamp '{s}' and ts < timestamp '{e}'"
     trades = con.execute(
-        f"select {TRADE_COLS} from option_trades where {rng} order by ts, trade_seq"
+        f"select {TRADE_COLS} from option_trades where {rng} order by {TRADE_ORDER}"
     ).df()
     fits = pd.read_parquet(CACHE / "fits.parquet")
     refits = pd.read_parquet(CACHE / "refits.parquet")
@@ -40,9 +40,10 @@ def load_inputs(cfg: Config, start: pd.Timestamp, end: pd.Timestamp) -> SimInput
     fund["available_ms"] = _ms(fund["available_at"])
     perp = con.execute(
         f"select ts, direction, price_usd, mark_price_usd, index_price_usd from perp_trades "
-        f"where {rng} order by ts, trade_seq"
+        f"where {rng} order by {TRADE_ORDER}"
     ).df()
     perp["ts_ms"] = _ms(perp.pop("ts"))
+    perp["direction"] = perp["direction"].astype("category")  # ~10M rows over a quarter
     log.info("trades %d, perp prints %d, refits in window %d", len(trades), len(perp),
              int(win.sum()))  # fmt: skip
     return SimInputs(

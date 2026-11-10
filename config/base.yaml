@@ -125,6 +125,9 @@ hedging:                       # Phase 6 (decisions D034, D036)
 risk:                          # Phase 6 (decision D035)
   vega_limit_usd: 2000.0       # |net book vega|, USD per vol pt: a 10-vol-pt shock ~ 12% of
                                # 50 ETH equity. Also the skew scale (kappa applies here).
+  gamma_limit_usd: 115.0       # |net cash gamma| = USD gamma P&L of a 1% ETH move (D043):
+                               # a training-period p99 daily move (13.3%) costs <= 12% of
+                               # starting capital (50 ETH x 3,353): 0.12 x 167.6k / 13.3^2
   max_position_contracts: 100.0   # per instrument, 4x the max quote size
   # Each side's size is cut to the room left under both limits; below the minimum order
   # the side is not quoted. Fills never exceed the quote, so only drift can breach.

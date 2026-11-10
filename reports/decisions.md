@@ -453,3 +453,35 @@ Each entry: the choice, the alternative, why, and the parameter's category:
   - Residual $0.0000 on both; 20/20 hand-checked fills on both.
   - The delta line worsens because the attribution values the book sticky-moneyness between refits (D029), so it sees the smile delta that Black leaves unhedged. Within a refit that is the known inconsistency; it costs less than the extra hedging it saves.
   - The stress loss is adverse selection (D037, D039) and barely moves.
+
+## D042 — Phase 8 design: select on train, report on test; four experiments
+- **Category:** free choice (owner decisions, 2026-11-10; the owner accepted the recommended settings)
+- **Periods:** train 2025-01-01 to 2025-04-28 (65%), test 2025-04-29 to 2025-06-30.
+- **Experiments** (one parameter at a time; the baseline is `config/base.yaml`):
+  - spread h ∈ {0.5, **1**, 2, 3} vol points;
+  - skew κ ∈ {0, **1**, 3};
+  - hedge band ∈ {2.5, **5**, 10, 20} ETH (added after the discussion of hedging costs vs gamma);
+  - latency ∈ {**0**, 1 s, 5 s}.
+- **Selection:** for spread, skew and band, the best value is chosen on **train** by mean daily P&L (Sharpe is reported alongside). The combination is "best". Latency is a condition, not a choice: test only.
+- **Robustness on test, applied to "best":** stricter fills (`max_fill_fraction` 0.25); looser fills (1.0, plus `at_price_fill_fraction` 0.5, the only relaxation of D003); fixed 10-contract sizing; random whole-contract fills (D027).
+- **Stress day:** daily mean DVOL ≥ the 80th percentile of **training** days.
+- **Comparison:** paired daily differences against the baseline, mean ± 2 standard errors, with the lag-1 autocorrelation reported as a warning that the error bar may be too narrow.
+- **Reproduction:** one command, `uv run python -m mm.run --config config/base.yaml --experiments config/experiments.yaml`. Each run is cached by a hash of its resolved config, so an interrupted batch resumes.
+
+## D043 — A cash-gamma limit
+- **Category:** from data (training period) plus a free choice (the 12% budget, the same as the vega limit); owner decision, 2026-11-10
+- **Choice:** |net cash gamma| ≤ `gamma_limit_usd` = $115, where cash gamma = the USD gamma P&L of a 1% ETH move, ½·Γ_S·(0.01·S)² summed over the book (Γ_S = basis × Black gamma). It is enforced like the vega limit (D035): each side's size is cut to the room left; buying adds +gᵢ, selling −gᵢ. Net gamma is recomputed at each refit and updated at each fill.
+- **Calibration:** the training-period 99th percentile of |daily ETH return| is 13.3%. A move that size costs 13.3² × G₁, and the budget is 12% of starting capital (50 ETH × $3,353 = $167.6k), so G₁ ≤ 0.12 × 167.6k / 13.3² ≈ $115.
+- **Alternatives:** vega buckets by tenor; no gamma limit.
+- **Why:** a 3-week smoke run on May 2025 lost $232k on about $90k of capital. During the rally takers bought calls and the book went heavily short **short-dated** gamma (2–8 days: tiny vega, large gamma). The net-vega limit could not see it.
+- **Effect:**
+  - May smoke run: −$232k → −$114k.
+  - 6–12 Jan: hedges 1,015 → 220, fills 1,252 → 1,095.
+  - Known gap: the limit only shapes new quotes. Gamma rises by itself as positions approach expiry (Γ ∝ 1/√T), so the book can drift above the limit. In May, mean |gamma| was 104% of the limit and 59% of quotes were cut. Active reduction (unwinding short-dated inventory) would need trading out of positions, which is an extension.
+
+## D044 — Exchange order for same-millisecond trades
+- **Category:** bug fix (found by the hand-check, 2026-11-10)
+- **Problem:** data loads ordered trades by `ts` only. Trades in the same millisecond came back in an undefined DuckDB order, and they can carry different index snapshots (e.g. 2025-01-09 08:21:06.648: 3,281.58 and 3,281.64). So "the latest index before t" was ambiguous, and runs were not guaranteed to be deterministic. One of 20 hand-checked fills failed on it.
+- **Fix:** Deribit trade ids are one global sequence across all instruments, so trades are ordered by (ts, trade number) everywhere: the curve's index series, futures basis observations, option and perp loads, and the engine's event sort. The hand-check applies the same rule in its own SQL.
+- **Result:** hand-check 20/20, and a wider 200/200; a rerun of 6–12 Jan is byte-identical.
+- **Not rebuilt:** the Phase 2 priced cache and the Phase 3 surface cache. Each mark uses its own trade's index, so the tie only touches forward lookups at sub-tick precision.

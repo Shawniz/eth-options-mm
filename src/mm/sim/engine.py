@@ -25,7 +25,7 @@ from mm.pricing.black76 import price_eth
 from mm.pricing.forwards import ForwardCurve
 from mm.pricing.time import MS_PER_YEAR
 from mm.quoting.quoter import apply_limits, in_universe, make_quote
-from mm.risk.greeks import book_vega_usd, perp_value_eth
+from mm.risk.greeks import book_gamma1_usd, book_vega_usd, perp_value_eth
 from mm.risk.limits import side_room
 from mm.sim.account import Account
 from mm.sim.delta import OptionDelta
@@ -133,12 +133,13 @@ def _value(acct: Account, ts_ms: int, inp: SimInputs, meta: _Meta, mark, delta) 
     }
 
 
-def _book_vega(acct: Account, refit_ms: int, inp: SimInputs, meta: _Meta) -> float:
-    """Net vega (USD per vol point) of the option book at refit R, from information
-    before R only: each expiry's latest live slice at or before R, forwards strictly < R."""
+def _book_greeks(acct: Account, refit_ms: int, inp: SimInputs, meta: _Meta):
+    """Net vega (USD per vol point) and net cash gamma (USD per 1% move squared) of the
+    option book at refit R, from information before R only: each expiry's latest live
+    slice at or before R, forwards strictly < R."""
     names = [n for n, q in acct.positions.items() if q]
     if not names:
-        return 0.0
+        return 0.0, 0.0
     m = [meta(n) for n in names]
     exp = np.array([x[0] for x in m], "int64")
     k = np.array([x[1] for x in m])
@@ -154,7 +155,7 @@ def _book_vega(acct: Account, refit_ms: int, inp: SimInputs, meta: _Meta) -> flo
             sig[i] = np.sqrt(max(w, 0.0) / sl["t_ref"])
     t = (exp - refit_ms) / MS_PER_YEAR
     n = np.array([acct.positions[x] for x in names])
-    return book_vega_usd(n, f, k, t, sig, s)
+    return book_vega_usd(n, f, k, t, sig, s), book_gamma1_usd(n, f, k, t, sig, s)
 
 
 def run(inp: SimInputs, cfg: Config) -> SimResult:
@@ -167,12 +168,17 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
     skips: Counter = Counter()
     lim: Counter = Counter()
     fills, daily, hedges, quotes = [], [], [], []
-    d_ts: list[int] = []
-    d_val: list[float] = []
+    # account delta at every hedge check (one per perp print or fill at most), preallocated
+    n_chk = (0 if inp.perp is None else len(inp.perp)) + len(inp.trades) + 16
+    d_ts = np.empty(n_chk, "int64")
+    d_val = np.empty(n_chk)
+    n_d = [0]
 
     tr = inp.trades
     tr = tr[(tr["ts_ms"] >= inp.start_ms) & (tr["ts_ms"] < inp.end_ms)]
-    tr = tr.sort_values(["ts_ms", "trade_seq"], kind="stable").reset_index(drop=True)
+    # exchange order: ts, then Deribit's global trade number (D044)
+    tr = tr.assign(_no=tr["trade_id"].astype(str).str.extract(r"(\d+)$")[0].astype("int64"))
+    tr = tr.sort_values(["ts_ms", "_no"], kind="stable").reset_index(drop=True)
     pauses = find_pauses(inp.activity_ms, sc.pause_gap_s, inp.book.grid)
     blocked = _blocked(tr["ts_ms"].to_numpy(), pauses)
 
@@ -201,7 +207,8 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
         ev.append((inp.end_ms, 2, "snapshot", None))
     ev.sort(key=lambda x: (x[0], x[1]))
     st = {"ev": 0, "pp": 0, "S": np.nan, "mark": np.nan, "pending": None}
-    vega_state = {"refit": None, "net": 0.0}  # net book vega, recomputed at each refit
+    # net book vega and cash gamma, recomputed at each refit, updated by fills
+    vega_state = {"refit": None, "net": 0.0, "gamma": 0.0}
 
     def account_delta(ts: int) -> float:
         d = acct.eth + odelta.total(acct, ts, st["S"])
@@ -212,8 +219,8 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
         if st["pending"] is not None or not np.isfinite(st["S"]):
             return
         d = account_delta(ts)
-        d_ts.append(ts)
-        d_val.append(d)
+        d_ts[n_d[0]], d_val[n_d[0]] = ts, d
+        n_d[0] += 1
         if needs_hedge(d, hcfg.delta_band_eth):
             dq = hedge_qty(d, st["S"], pspec.contract_size_usd)
             if abs(dq) >= pspec.min_order_usd:
@@ -288,7 +295,7 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
         "ts_ms", "trade_id", "trade_seq", "instrument_name", "direction", "price_eth",
         "amount_contracts", "exp_ms", "strike_usd", "option_type", "t_years", "fit_kind",
         "refit_ms", "forward_q", "index_q", "sigma_fair", "fair_eth", "is_suspect",
-        "is_liquidation", "otm_delta", "vega_usd",
+        "is_liquidation", "otm_delta", "vega_usd", "gamma1_usd",
     ]  # fmt: skip
     for i, row in enumerate(tr[cols].itertuples(index=False)):
         advance(row.ts_ms)
@@ -311,7 +318,8 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
             continue
         if vega_state["refit"] != row.refit_ms:
             vega_state["refit"] = row.refit_ms
-            vega_state["net"] = _book_vega(acct, int(row.refit_ms), inp, meta)
+            vega_state["net"], vega_state["gamma"] = _book_greeks(acct, int(row.refit_ms), inp,
+                                                                  meta)  # fmt: skip
         call = row.option_type == "C"
         v_net = vega_state["net"]
         q0 = make_quote(row.sigma_fair, row.forward_q, row.strike_usd, row.t_years, call,
@@ -320,7 +328,8 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
             skips["no_size"] += 1
             continue
         pos_before = acct.positions.get(row.instrument_name, 0.0)
-        bid_room, ask_room = side_room(vega_state["net"], row.vega_usd, pos_before, rcfg)
+        bid_room, ask_room = side_room(vega_state["net"], row.vega_usd, pos_before, rcfg,
+                                       vega_state["gamma"], row.gamma1_usd)  # fmt: skip
         q = apply_limits(q0, bid_room, ask_room, spec)
         for side, before, after in (("bid", q0.bid, q.bid), ("ask", q0.ask, q.ask)):
             if before is None:
@@ -331,7 +340,8 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
             elif size_after < q0.size:
                 lim[f"{side}_cut"] += 1
         lim["quotes"] += 1
-        quotes.append((row.ts_ms, vega_state["net"], q0.size, q.bid_size, q.ask_size))
+        quotes.append((row.ts_ms, vega_state["net"], vega_state["gamma"], q0.size, q.bid_size,
+                       q.ask_size))  # fmt: skip
         if q.bid is None and q.ask is None:
             skips["limit"] += 1
             continue
@@ -350,8 +360,9 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
         acct.option_fill(row.ts_ms, row.instrument_name, d.our_side, d.qty, d.price, fee)
         acct.check()
         signed = d.qty if d.our_side == "buy" else -d.qty
-        net_before = vega_state["net"]
+        net_before, gamma_before = vega_state["net"], vega_state["gamma"]
         vega_state["net"] += signed * row.vega_usd
+        vega_state["gamma"] += signed * row.gamma1_usd
         odelta.invalidate()
         fills.append(
             {
@@ -367,6 +378,7 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
                 "skew_capped": q.skew_capped,
                 "floor_bound": q.floor_bound,
                 "net_vega_usd": net_before,
+                "net_gamma1_usd": gamma_before,
                 "our_side": d.our_side,
                 "fill_price": d.price,
                 "eligible": d.eligible,
@@ -397,7 +409,10 @@ def run(inp: SimInputs, cfg: Config) -> SimResult:
         acct,
         pauses,
         pd.DataFrame(hedges, columns=hedge_cols),
-        pd.DataFrame({"ts_ms": np.array(d_ts, "int64"), "delta_eth": np.array(d_val)}),
-        pd.DataFrame(quotes, columns=["ts_ms", "net_vega_usd", "size", "bid_size", "ask_size"]),
+        pd.DataFrame({"ts_ms": d_ts[: n_d[0]], "delta_eth": d_val[: n_d[0]]}),
+        pd.DataFrame(
+            quotes,
+            columns=["ts_ms", "net_vega_usd", "net_gamma1_usd", "size", "bid_size", "ask_size"],
+        ),  # fmt: skip
         lim,
     )

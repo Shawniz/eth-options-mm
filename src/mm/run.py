@@ -15,9 +15,15 @@ def _parse_date(s: str) -> datetime:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="mm.run", description=__doc__)
     p.add_argument("--config", required=True, help="Path to a YAML config")
-    p.add_argument("--start", required=True, type=_parse_date, help="UTC start date YYYY-MM-DD")
-    p.add_argument("--end", required=True, type=_parse_date, help="UTC end date YYYY-MM-DD")
+    p.add_argument("--start", type=_parse_date, help="UTC start date YYYY-MM-DD")
+    p.add_argument("--end", type=_parse_date, help="UTC end date YYYY-MM-DD")
+    p.add_argument("--experiments", help="Phase 8: run config/experiments.yaml (train + test)")
+    p.add_argument("--workers", type=int, help="parallel runs for --experiments")
     args = p.parse_args(argv)
+    if args.experiments:
+        return args
+    if args.start is None or args.end is None:
+        p.error("--start and --end are required (or use --experiments)")
     if args.end <= args.start:
         p.error("--end must be after --start")
     return args
@@ -35,6 +41,13 @@ def main(argv: list[str] | None = None) -> Config:
 
     args = parse_args(argv)
     cfg = load_config(args.config)
+    if args.experiments:
+        from mm.experiments.runner import run_experiments
+        from mm.experiments.table import write as write_table
+
+        run_experiments(args.config, args.experiments, args.workers)
+        print(f"results -> {write_table(args.config, args.experiments)}")
+        return cfg
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     label = f"{args.start:%Y-%m-%d}_{args.end:%Y-%m-%d}"
     print(f"Run {label} (UTC), config {args.config}")
