@@ -145,6 +145,22 @@ class PricingConfig(_Strict):
 
 class SimConfig(_Strict):
     latency_ms: int = Field(ge=0)
+    initial_eth: float = Field(ge=0)
+    pause_gap_s: float = Field(gt=0)
+    fill_sizing: Literal["expected", "random"]
+    seed: int
+    run_dir: Path
+
+
+class FixedQuoteConfig(_Strict):
+    half_spread_volpts: float = Field(gt=0)
+    size_contracts: float = Field(gt=0)
+    min_days: float = Field(ge=0)
+    max_days: float = Field(gt=0)
+
+
+class QuotingConfig(_Strict):
+    fixed: FixedQuoteConfig
 
 
 class FillConfig(_Strict):
@@ -200,6 +216,7 @@ class Config(_Strict):
     pricing: PricingConfig
     sim: SimConfig
     fill: FillConfig
+    quoting: QuotingConfig
     surface: SurfaceConfig
 
 

@@ -234,3 +234,34 @@ Each entry: the choice, the alternative, why, and the parameter's category:
     - hourly-change correlation, for information only: up from 0.17 to 0.38.
   - Cost: more expiries over 100 days carry or have no smile (39% none). This is acceptable, because quoting is limited to a shorter range anyway (Phase 5).
   - A few isolated one-refit spikes remain in the 30-day ATM, RR25 and BF25 series (e.g. early Feb, late Jun). Phase 5 should be robust to a single bad refit.
+
+## D027 — Fill size: expected (fractional) contracts
+- **Category:** free choice (owner decision, 2026-11-10)
+- **Choice:** Fill size = min(trade size, what is left of our quote) × `max_fill_fraction`, kept fractional (`sim.fill_sizing: expected`). A 1-contract trade that crosses our quote fills 0.5 contracts.
+- **Alternatives:**
+  - Seeded random whole contracts with the same mean (`fill_sizing: random`, keyed by trade_seq so every variant sees the same draws). Kept for the Phase 8 robustness check.
+  - Rounding down to whole contracts: rejected. 53% of option trades are a single contract, so it would silently drop most of the flow.
+- **Why:**
+  - Without order-book data there is no queue position to simulate. The trade-through rule plus a participation fraction is the usual conservative convention.
+  - P&L, fees and Greeks are linear in size, so expected size gives the same average as the random version without its noise. That suits paired comparisons and CLAUDE.md's determinism rule.
+  - Cost: logged sizes are not real order sizes.
+
+## D028 — Exchange pauses: no quotes until the next refit
+- **Category:** free choice, from the Phase 1 data notes
+- **Choice:** A gap of more than `sim.pause_gap_s` (120 s) with no trade on any stream is a pause. Quoting stays off from the end of the gap until the first surface refit after it.
+- **Alternative:** Ignore pauses (listed in extensions.md as a possible simplification).
+- **Why:** After a pause the underlying, forwards and surface inputs are stale. The rule is cheap to apply. On 6–12 Jan 2025 it caught 12 gaps and blocked 38 trades.
+
+## D029 — Simulator conventions (Phase 4)
+- **Category:** free choice, except where noted
+- **Choices:**
+  - **Suspect trades fill us** (owner decision, 2026-11-10). Real bad data was already dropped in Phase 1. A suspect trade really printed, and a better resting quote would have been hit first. We fill at our own quote, so a strange print cannot hand us a windfall. Fills carry the flag.
+  - **Sweeps:** one taker order sweeping several levels arrives as several trades at the same timestamp. Our quote is used up across them and is replenished only at a trade after fill time + latency. Otherwise one sweep could fill us several times over.
+  - **Quotes only for expiries with their own slice** (full or carry) at the latest refit. No interpolated smiles, and no older slice if the latest refit has none.
+  - **Between refits**, the slice's implied vol at the current moneyness, k = ln(K/F) with F the latency-shifted forward, is held fixed and priced at the trade's own time to expiry.
+  - **Refit timing:** a refit stamped at R uses marks before R, so it is usable by quotes at R or later (refit → quote tie-break, CLAUDE.md).
+  - **Perpetual trades are not loop events in Phase 4.** The underlying comes from the forward curve. Perp trades enter the loop in Phase 6, with hedging.
+  - **Daily options** for the delivery-fee exemption (D012, unverified) = expiries on a weekday other than Friday.
+- **Observed on 6–12 Jan 2025 (placeholder quoter, ±2 vol points):**
+  - **Volume share:** we fill 4.7% of trades and 0.78% of contracts; 20/20 hand-checked fills match.
+  - **Wings:** in the far wings (more than 2 standard deviations from the forward), our fair vol at fills is a median 5.5 vol points below Deribit's mark. The 3-parameter eSSVI smile can't follow the steep put wing, and vega weighting gives it little weight in the fit. Because fills concentrate where we are mispriced, that's where it shows. Phase 5's minimum |delta| universe rule should keep us out of those strikes.

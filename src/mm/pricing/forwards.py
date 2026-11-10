@@ -142,6 +142,15 @@ class ForwardCurve:
 
         self._known = np.array(sorted(set(self._fut) | set(self._par)), dtype="int64")
 
+    @property
+    def activity_ms(self) -> np.ndarray:
+        """Timestamps of every trade the index was built from (all streams)."""
+        return self._idx_ts
+
+    def index_at(self, ts_ms: int, inclusive: bool = False) -> float:
+        j = np.searchsorted(self._idx_ts, ts_ms, side="right" if inclusive else "left") - 1
+        return float(self._idx_val[j]) if j >= 0 else float("nan")
+
     # --- basis for one expiry at many cutoffs ---
     @staticmethod
     def _latest(ts, val, cutoff, max_age_ms: float, side: str):

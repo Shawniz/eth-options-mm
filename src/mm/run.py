@@ -24,11 +24,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> Config:
+    import logging
+    from pathlib import Path
+
+    import pandas as pd
+
+    from mm.sim.engine import run
+    from mm.sim.load import load_inputs
+    from mm.sim.report import save, write_report, write_summary
+
     args = parse_args(argv)
     cfg = load_config(args.config)
-    print(f"Run {args.start:%Y-%m-%d} -> {args.end:%Y-%m-%d} (UTC)")
-    print(cfg.model_dump_json(indent=2))
-    # Phases 1+ plug the pipeline in here.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    label = f"{args.start:%Y-%m-%d}_{args.end:%Y-%m-%d}"
+    print(f"Run {label} (UTC), config {args.config}")
+    start, end = pd.Timestamp(args.start), pd.Timestamp(args.end)
+    inp = load_inputs(cfg, start, end)
+    res = run(inp, cfg)
+    run_dir = Path(cfg.sim.run_dir) / label
+    save(res, run_dir)
+    summary = write_report(cfg, inp, res, label, Path(f"reports/phase4_sim_{label}.md"))
+    write_summary(summary, run_dir)
+    print(
+        f"fills {summary['fills']:,}, share {summary['share_of_contracts'] * 100:.2f}%, "
+        f"final ETH {summary['final_eth']:.4f} -> {run_dir}"
+    )
     return cfg
 
 

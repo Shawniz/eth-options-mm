@@ -28,6 +28,7 @@ uv sync                                   # install
 uv run pytest                             # all tests
 uv run ruff check . && uv run ruff format .
 uv run python -m mm.run --config config/base.yaml --start YYYY-MM-DD --end YYYY-MM-DD
+uv run python -m mm.sim.handcheck --config config/base.yaml --run START_END   # 20 fills recomputed
 
 # data pipeline (UTC dates, --end exclusive, default = config study_period)
 uv run python -m mm.data.cli download --config config/base.yaml [--start D --end D]

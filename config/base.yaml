@@ -80,6 +80,13 @@ pricing:
 sim:
   # Underlying price used for re-pricing is taken this long before each trade.
   latency_ms: 0          # Phase 8 experiment: 0, 1000, 5000
+  initial_eth: 50.0      # starting ETH balance (collateral); free choice
+  pause_gap_s: 120       # no trade on any stream for longer than this = exchange pause:
+                         # stop quoting until the first refit after trading resumes (D028)
+  fill_sizing: expected  # expected: fractional size = eligible x max_fill_fraction (D027)
+                         # random: whole contracts, P(one more) from the fraction, seeded
+  seed: 0
+  run_dir: data/runs
 
 fill:
   # Taker sell at p fills our bid only if bid > p; taker buy fills our ask only if ask < p.
@@ -87,6 +94,13 @@ fill:
   at_price_fill_fraction: 0.0
   # Fill size = min(trade size, our quote size) * max_fill_fraction.
   max_fill_fraction: 0.5
+
+quoting:
+  fixed:                       # Phase 4 placeholder quoter; Phase 5 replaces it
+    half_spread_volpts: 2.0    # bid at fair vol - h, ask at fair vol + h
+    size_contracts: 10.0       # per side
+    min_days: 1.0              # expiries quoted: min_days <= T <= max_days
+    max_days: 90.0
 
 surface:                     # Surface A: SVI per expiry on Deribit mark IVs (D020-D022)
   refit_interval_s: 300        # 1-5 minutes allowed

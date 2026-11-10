@@ -38,9 +38,11 @@ def index_series(frames: list[pd.DataFrame]) -> pd.DataFrame:
     return s.dropna().sort_values("ts", kind="stable").reset_index(drop=True)
 
 
-def build_curve(cfg: Config) -> ForwardCurve:
+def build_curve(cfg: Config, start=None, end=None) -> ForwardCurve:
+    """Forward curve over [start, end) (default: the study period), plus a day of warm-up."""
     con = connect(cfg.data.clean_dir)
-    s, e = str(cfg.study_period.start), str(cfg.study_period.end)
+    s = str(start or cfg.study_period.start)
+    e = str(end or cfg.study_period.end)
     # A day of warm-up before the start so the first trades have a basis.
     rng = f"ts >= timestamp '{s}' - interval 1 day and ts < timestamp '{e}'"
     index = con.execute(f"select ts, index_price_usd from perp_trades where {rng} order by ts").df()
