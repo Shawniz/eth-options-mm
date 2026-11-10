@@ -122,10 +122,10 @@ The account holds: ETH balance `B` (collateral, premiums, fees, funding, settled
    - Every fill is logged with its reason.
 5. **Quoting universe** (config): expiries from `min_days` to `max_days` (`min_days` is also the near-expiry cut-off), strikes with OTM delta min(|Δ_call|, |Δ_put|) ≥ `min_abs_delta` at fair vol (D030).
 6. **Spread:** a flat half-spread in vol points around fair vol, with a minimum price width (ticks, and enough to cover fees). Bids rounded down, asks up.
-7. **Inventory skew:** both quotes shift by `Δσ = −κ · net_vega / vega_ref` (total book vega), capped at ±h so we never quote through fair (D032).
+7. **Inventory skew:** both quotes shift by `Δσ = −κ · net_vega / vega_limit` (total book vega; the vega limit is the scale, D035), capped at ±h so we never quote through fair (D032).
 8. **Sizing:** capped vega-normalised by default: `size = min(target_vega / vega_i, max_contracts)`, rounded down to the order increment; no quote below the minimum order size. Fixed-contract sizing kept as a config option for a robustness check.
-9. **Hedging:** one policy: when `|Δ_USD|` exceeds `delta_band`, hedge back to zero with the perpetual as a **taker** (taker fee plus `hedge_cost_bps` slippage).
-10. **Limits:** total vega limit and per-instrument position limit. Near a limit, quote only the risk-reducing side.
+9. **Hedging:** one policy: when `|Δ_USD|` exceeds `delta_band` (checked after every perp print and option fill), hedge back to zero with the perpetual as a **taker**. The order fills at the first same-side perp print strictly after the decision, at or after decision + latency, at that print ± `hedge_cost_bps`, plus the taker fee (D036). The collateral is hedged too (D034).
+10. **Limits:** total vega limit and per-instrument position limit. Each side's size is cut to the room left; a side below the minimum order is dropped, so near a limit only the risk-reducing side is quoted (D035).
 11. **Funding** accrues on the perpetual position at Deribit's funding times.
 12. **Expiry settlement** at Deribit's official delivery price; positions are removed and settled in ETH.
 13. **Valuation for P&L:** always at Surface A (the market's fair value), never at a quoting variant's own surface.

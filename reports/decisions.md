@@ -290,6 +290,7 @@ Each entry: the choice, the alternative, why, and the parameter's category:
   Defaults are 1 tick and 1 × fee, so each fill at least pays its own fee relative to the centre. No bid if it would fall below the minimum tick. Quotes stay at least one tick wide.
 - **Alternative:** a floor around fair rather than around the skewed centre; a fee floor only.
 - **Why:** The floor is about width, not edge. Skew is meant to move the whole quote, so the floor moves with it. Rounding down the bid and up the ask never improves our price beyond the model's.
+- **Consequence:** when the skew sits at its cap (±h, D032), the inner quote can be exactly at fair. Such a fill has zero edge against fair and pays the maker fee, so it loses the fee. That is the intended price of unloading inventory: spread capture against fair stays ≥ 0, but net of fees it can be slightly negative.
 - **Observed (6–12 Jan 2025, h = 1 vol point):** the floor sets a side at 47% of fills: 90% at 2–8 days (median vega $0.92 per contract, so 1 vol point is less than a 0.0005 tick), 15% at 8–35 days, 0% at 35–100 days. **Phase 8 note:** at short expiries the narrow spread settings (0.5 and 1 vol point) are the same quote; the spread experiment mainly moves the longer expiries.
 
 ## D032 — Inventory skew on total book vega, capped at the half-spread
@@ -314,3 +315,59 @@ Each entry: the choice, the alternative, why, and the parameter's category:
 - **Alternative:** fixed contracts (the Phase 4 placeholder).
 - **Why:** Every quote offers about the same vega risk, so a fill in a 60-day option and a fill in a 5-day option move the book's vega by similar amounts. The cap stops low-vega short expiries from being quoted in very large size.
 - **Observed (6–12 Jan 2025):** the cap binds on 60% of fills (median size 25 at 2–8 days, 22 at 8–35 days, 11 at 35–100 days). In practice short expiries are fixed-size at the cap. Whether to raise the cap or lower the target is a Phase 8 sensitivity, not tuned here.
+
+## D034 — Account delta and hedging the collateral
+- **Category:** from theory (CLAUDE.md formula); hedging the collateral is an owner decision (2026-11-10)
+- **Choice:**
+  - Δ = B + Σ nᵢ·N(d1ᵢ) (N(d1) − 1 for puts) + Q/P0, in ETH (USD per $1 move in ETH).
+  - The hedger targets Δ = 0, so the initial 50 ETH collateral is hedged too: the first hedge sells about $150k of perp.
+  - Option deltas use Black delta at the Surface A vol at the current moneyness (sticky moneyness between refits, as for quotes), with F = basis × S and S from the latest perp print's index.
+- **Alternatives:** hedge only the option book (so P&L in USD carries 50 ETH of spot exposure); hold the collateral in USD.
+- **Why:** P&L and risk are in USD (CLAUDE.md), so unhedged collateral would swamp the options P&L with spot moves. The short perp that hedges the collateral earns or pays funding. That carry is the same for every variant and is reported as its own line (Phase 7).
+- **Expiry jumps:** at settlement, an ITM option turns into a fixed ETH amount in B. Its delta jumps from ±1 per contract to that ETH amount (e.g. 10 Jan 2025: about 110 ETH in one print), and the next check hedges it. This is real for coin-settled options, not a bug.
+
+## D035 — Limits: shrink each side to the room left; V_ref = the vega limit
+- **Category:** free choice (owner decisions, 2026-11-10)
+- **Choice:**
+  - |net vega| ≤ `vega_limit_usd` ($2,000 per vol point) and |nᵢ| ≤ `max_position_contracts` (100).
+  - Each side's quote size is cut to the room left under both limits (bid room = min(cap − n, (L − V)/vegaᵢ); ask room = min(cap + n, (L + V)/vegaᵢ)). A side below the minimum order is not quoted.
+  - The skew scale is the vega limit itself: Δσ = clip(−κ·V/L, ±h). `quoting.vega_ref_usd` is removed, so κ is "the skew at the limit".
+- **Alternatives:** a fixed "near" threshold (e.g. drop the side above 90% of the limit); a separate V_ref.
+- **Why:**
+  - A fill is never larger than the quote, so fills alone can never breach a limit (property test). Only drift (vega moving with spot and time) can breach, and then only the risk-reducing side has room. That is CLAUDE.md's "near a limit, quote only the risk-reducing side" with no extra threshold to choose.
+  - $2,000: a 10 vol point shock costs about $20k, roughly 12% of the 50 ETH ($165k) capital. 100 contracts is 4× the maximum quote size.
+
+## D036 — Hedge execution: next same-side perp print after the latency, plus 1 bp
+- **Category:** free choice, backed by data (owner decision, 2026-11-10)
+- **Choice:**
+  - Trigger: |Δ| > `delta_band_eth` (5 ETH), checked after every perp print and every option fill.
+  - Size: ΔQ = −S·Δ, whole $1 contracts.
+  - Execution: the first perp print **on our side** (a sell hedge needs a taker-sell print, i.e. the bid) **strictly after** the trigger with ts ≥ trigger + latency.
+  - Price: print × (1 ± `hedge_cost_bps` = 1 bp). Fee: taker 0.05% × |ΔQ| / price, in ETH.
+  - At each hedge the open perp P&L is settled into B and P0 resets to the execution price (delta unchanged, unit test). No new hedge is decided while one is pending.
+- **Alternatives:**
+  - The next print of any side: rejected. Prints alternate between bid and ask (consecutive opposite-side prints differ by a median 0.9 bp, 27 Jan – 10 Feb 2025), so a sell hedge would often fill at the ask.
+  - The decision print itself: that is lookahead.
+  - Maker hedging at the 0% fee: CLAUDE.md fixes taker hedging; this is an extension.
+- **Why:**
+  - Same-side prints pay the spread a real taker pays.
+  - The 1 bp covers size. Median print $476, p99 $27k, while a typical hedge is $15–20k.
+  - Same-side prints come every 3 ms (median), p99 about 25 s; long gaps happen only in exchange pauses.
+
+## D037 — Phase 6 results and what they leave for Phase 7
+- **Category:** results (no parameter changed after seeing them)
+- **Checks (done-when):**
+  - Unit tests pass: hedge sign and rounding, inverse-perp P&L and Q/P0 delta by bump, delta and value unchanged at perp settlement, funding sign on the short hedge, premium-adjusted delta through B, limits never breached by fills (property test), Black delta = bump-and-revalue on a flat smile.
+  - **Stress run, 27 Jan – 10 Feb 2025** (training data; the 3 Feb crash took ETH from about 2,870 to 2,150 and back to 2,880):
+    - |Δ| ≤ 5 ETH in 99.30% of the time and 99.85% of 1.88M checks;
+    - 2,868 hedges (205 a day, $46.6M of perp), taker fees 8.56 ETH, slippage 1.71 ETH;
+    - wait from decision to the same-side print: median 0.24 s, p99 43 s;
+    - the largest |Δ| (136, 98, 88 ETH) are all 08:00 expiry settlements (D034).
+  - **Limits visibly cut quoting:** net vega touched both −$2,000 and +$2,000 on 3 Feb. 1.5% of quotes were one-sided overall, with hourly peaks at 47% (see `reports/figures/sim_2025-01-27_2025-02-10_vega.png`).
+  - 20/20 hand-checked fills match on both the 6–12 Jan and stress runs, including limit-cut sizes.
+- **Results that need Phase 7:**
+  - **Hedging costs are as large as the edge.** 6–12 Jan: 1,015 hedges, 2.90 ETH fees + 0.58 ETH slippage, against +3.3 ETH of edge at fill. Only 109 hedges were triggered by fills; the rest came from gamma on short-dated inventory held into expiry.
+  - **The stress fortnight lost 73% of equity in USD** ($159k → $35k). 3 Feb alone: options +23.6 ETH (premium + settlement + value change), perp hedge −45.9 ETH, fees −5.5 ETH. Two contributors were measured; their split is for the Phase 7 waterfall and markouts:
+    1. **Smile delta left unhedged.** On the 2 Feb book, Black delta is +0.8 ETH but the sticky-moneyness bump delta is +18.3 ETH. Between refits Surface A values options at the current moneyness, so a risk-reversal book (long puts, short calls; net vega $352, gross $3,474) has spot exposure that Black delta does not see. CLAUDE.md fixes Black delta; smile-adjusted delta is an extension.
+    2. **Crash flow against a stale surface.** 7,716 contracts traded on 3 Feb, half the fortnight, at a surface refitted every 5 minutes from a 60-minute window. The +7.6 ETH "edge" is measured against that same surface, so it may be adverse selection. Delta-hedged markouts will show.
+- **Also:** the perp traded at a discount to the index in the crash (median −10 bp at our hedges, p1 −309 bp). Hedge sizes use the index, so this shows up as hedge cost and residual delta.
