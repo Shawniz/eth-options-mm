@@ -220,3 +220,17 @@ Each entry: the choice, the alternative, why, and the parameter's category:
   - **The level band reflects construction.** DVOL is a variance-swap-style index and sits above ATM by construction (mean gap 3.2).
   - **Error targets are tied to the spreads we'll quote.** For quoted expiries, the median error sits below the narrowest half-spread tested in Phase 8 (0.5 vol points), and p95 below the wider ones. The 0–2 day bucket is looser: tiny premiums, and Phase 5 will likely cut it off.
 - **Caveat:** these targets were set after seeing the data. They show the surface is fit for its use; they are not an independent test.
+- **Result (H1 2025):** PASS.
+  - Fit error within target in every bucket (median / p95):
+    - 0–2 d: 1.06 / 3.19
+    - 2–8 d: 0.69 / 2.48
+    - 8–35 d: 0.33 / 1.55
+    - 35–100 d: 0.23 / 1.02
+    - over 100 d: 0.16 / 0.88
+  - 99.1% of normal-day refits arbitrage-free (butterfly 0%, calendar 0.9% of all refits).
+  - DVOL tracking:
+    - daily-change correlation 0.858;
+    - 99.0% of hours with DVOL − ATM in [0, 8] (mean 3.40, std 1.43);
+    - hourly-change correlation, for information only: up from 0.17 to 0.38.
+  - Cost: more expiries over 100 days carry or have no smile (39% none). This is acceptable, because quoting is limited to a shorter range anyway (Phase 5).
+  - A few isolated one-refit spikes remain in the 30-day ATM, RR25 and BF25 series (e.g. early Feb, late Jun). Phase 5 should be robust to a single bad refit.

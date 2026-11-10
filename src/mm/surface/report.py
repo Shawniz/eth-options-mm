@@ -102,14 +102,16 @@ def rmse_table(fits: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, bool]:
 
 def bucket_table(fits: pd.DataFrame) -> pd.DataFrame:
     f = fits.copy()
-    f["T"] = pd.cut(f["t_ref"] * 365, T_BUCKETS).astype(str)
+    f["T"] = pd.cut(f["t_ref"] * 365, T_BUCKETS)  # categorical: keeps numeric order
     full = f[f["kind"] == "full"]
-    a = full.groupby("T")["rmse_volpts"].agg(
+    a = full.groupby("T", observed=True)["rmse_volpts"].agg(
         full_fits="size", median="median", p95=lambda x: x.quantile(0.95)
     )
-    k = f.groupby("T")["kind"].value_counts(normalize=True).unstack(fill_value=0)
+    k = f.groupby("T", observed=True)["kind"].value_counts(normalize=True).unstack(fill_value=0)
     k.columns = [f"share {c}" for c in k.columns]
-    return a.join(k).reset_index().rename(columns={"T": "expiry days"})
+    out = a.join(k).reset_index().rename(columns={"T": "expiry days"})
+    out["expiry days"] = out["expiry days"].astype(str)
+    return out
 
 
 def normal_days(dvol: pd.DataFrame, cfg: Config) -> pd.Series:
