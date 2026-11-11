@@ -47,6 +47,10 @@ def main(argv: list[str] | None = None) -> Config:
 
         run_experiments(args.config, args.experiments, args.workers)
         print(f"results -> {write_table(args.config, args.experiments)}")
+        from mm.experiments.note_figures import write as write_note_figures
+
+        for p in write_note_figures(args.config, args.experiments):
+            print(f"figure -> {p}")
         return cfg
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     label = f"{args.start:%Y-%m-%d}_{args.end:%Y-%m-%d}"

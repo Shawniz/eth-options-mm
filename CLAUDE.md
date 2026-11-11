@@ -31,6 +31,8 @@ uv run python -m mm.run --config config/base.yaml --start YYYY-MM-DD --end YYYY-
 uv run python -m mm.sim.handcheck --config config/base.yaml --run START_END   # 20 fills recomputed
 uv run python -m mm.pnl.report --config config/base.yaml --run START_END      # P&L attribution, markouts
 uv run python -m mm.pnl.smile_dynamics --config config/base.yaml              # sticky strike vs moneyness
+uv run python -m mm.run --config config/base.yaml --experiments config/experiments.yaml   # Phase 8 grid, results table, note figures
+uv run python -m mm.experiments.note_figures --config config/base.yaml --experiments config/experiments.yaml  # note figures only
 
 # data pipeline (UTC dates, --end exclusive, default = config study_period)
 uv run python -m mm.data.cli download --config config/base.yaml [--start D --end D]

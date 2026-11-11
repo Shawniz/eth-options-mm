@@ -508,3 +508,11 @@ Each entry: the choice, the alternative, why, and the parameter's category:
   - The run summary's total comes from the replay, with `engine_minus_replay_usd` recorded as a check.
   - Tests cover both cases and fail on the old code.
 - **Not rerun:** the five cached training runs (about 2 h on the laptop). Their `daily_pnl` differs from a fresh run only by that common ≈ $26 on day 1, and their `summary.json` totals are NaN. The cache key is the config hash, so to regenerate them, delete `data/runs/exp/train/`.
+
+## D046 — Phase 9 write-up: charts from saved outputs, no rerun
+- **Category:** free choice (owner, 2026-11-11: "b should be good")
+- **Choice:** the note's three charts come from the Phase 8 runner's saved outputs for the "best" variant on the test period (`daily_pnl`, `markouts`, `fills`, `hedges`). `mm.experiments.note_figures` draws them, and it runs at the end of `mm.run --experiments`.
+- **Worst-day chart:** the ETH index with our fills and hedges, the cumulative vega we traded, and that day's P&L by component from daily totals.
+- **Alternative:** rerun "best" (about 45 min) and save the intraday attribution, so the worst day could be split by component hour by hour. Not needed to explain the day.
+- **Rule for numbers:** every result number in the note comes from the experiments command's outputs. Setup-validation numbers cite their own reports. Earlier exploratory runs appear only as motivation, through their decisions.
+- **Found while writing:** both the baseline and "best" lose more than the starting capital (50 ETH ≈ $90k on 29 April) during the test period, on 18 May and 16 June. There is no margin model, so this is stated as a simplification. Paired comparisons are unaffected.

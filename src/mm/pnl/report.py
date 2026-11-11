@@ -70,11 +70,18 @@ def grouped(rows: pd.DataFrame, freq: str) -> pd.DataFrame:
     return g.resample(freq).sum()
 
 
-def fig_cumulative(rows, path: Path):
+def fig_cumulative(rows, path: Path, ref: pd.Series | None = None, ref_label: str = "",
+                   label: str = "this run"):  # fmt: skip
+    """ref: optional daily total P&L (indexed by date) drawn as a comparison line."""
     d = grouped(rows, "1D")
     fig, ax = plt.subplots(2, 1, figsize=(10, 7), sharex=True, facecolor=SURFACE,
                            gridspec_kw={"height_ratios": [1, 1.4]})  # fmt: skip
-    ax[0].plot(d.index, d.sum(axis=1).cumsum() / 1e3, color=INK, linewidth=1.4)
+    ax[0].plot(d.index, d.sum(axis=1).cumsum() / 1e3, color=INK, linewidth=1.4, label=label)
+    if ref is not None:
+        rt = pd.to_datetime(pd.Index(ref.index)).tz_localize("UTC")
+        ax[0].plot(rt, ref.cumsum().to_numpy() / 1e3, color=SERIES[1], linewidth=1.2,
+                   linestyle="--", label=ref_label)  # fmt: skip
+        ax[0].legend(frameon=False, fontsize=8, loc="lower left", labelcolor=INK2)
     ax[0].axhline(0, color=AXIS, linewidth=0.8)
     _style(ax[0], "Cumulative P&L, $ thousands")
     pos, neg = np.zeros(len(d)), np.zeros(len(d))

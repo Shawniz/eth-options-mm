@@ -118,3 +118,80 @@ def test_runs_are_deterministic(cfg):
         return daily_components(att.rows)
 
     pd.testing.assert_frame_equal(once(), once())
+
+
+# ---------------- Phase 9 note figures ----------------
+
+from mm.experiments import note_figures as nf  # noqa: E402
+from mm.pnl.attribution import COMPONENTS as _COMP  # noqa: E402
+from mm.pnl.report import GROUPS as _GROUPS  # noqa: E402
+from mm.pnl.report import grouped as _grouped  # noqa: E402
+
+
+def _daily(totals, days):
+    d = pd.DataFrame(0.0, index=pd.to_datetime(days).date, columns=_COMP)
+    d["gamma"] = totals
+    d["spread_capture"] = 1.0
+    d["total"] = d[_COMP].sum(axis=1)
+    return d
+
+
+def test_worst_day_is_the_minimum_of_daily_total():
+    d = _daily([-5.0, -9.0, 3.0], ["2025-05-08", "2025-05-09", "2025-05-10"])
+    assert nf.worst_day(d) == pd.Timestamp("2025-05-09", tz="UTC")
+
+
+def test_daily_rows_regroup_to_the_same_days_and_components():
+    d = _daily([-5.0, -9.0, 3.0], ["2025-05-08", "2025-05-09", "2025-05-10"])
+    g = _grouped(nf.daily_rows(d), "1D")
+    assert list(g.index.date) == list(d.index)
+    assert g["gamma"].tolist() == [-5.0, -9.0, 3.0]
+    assert np.allclose(g.sum(axis=1).to_numpy(), d["total"].to_numpy())
+    day = nf.grouped_day(d, pd.Timestamp("2025-05-09", tz="UTC"))
+    assert list(day.index) == list(_GROUPS) and day.sum() == pytest.approx(-8.0)
+
+
+def _fills(rows):  # (time, our side, qty, vega per contract, gamma per contract)
+    return pd.DataFrame({
+        "ts_ms": [int(pd.Timestamp(t, tz="UTC").value // 10**6) for t, *_ in rows],
+        "our_side": [s for _, s, *_ in rows], "qty": [q for _, _, q, *_ in rows],
+        "vega_usd": [v for *_, v, _ in rows], "gamma1_usd": [g for *_, g in rows],
+    })  # fmt: skip
+
+
+def test_traded_signs_by_our_side_and_keeps_only_that_day():
+    f = _fills(
+        [
+            ("2025-05-09 01:00", "buy", 2.0, 3.0, 0.5),
+            ("2025-05-09 02:00", "sell", 1.0, 4.0, 0.25),
+            ("2025-05-10 00:00", "buy", 9.0, 9.0, 9.0),
+        ]
+    )  # next day: excluded
+    t = nf.traded(f, pd.Timestamp("2025-05-09", tz="UTC"))
+    assert t["n"].tolist() == [2.0, -1.0]
+    assert t["vega_traded"].tolist() == [6.0, -4.0]
+    assert t["gamma_traded"].tolist() == [1.0, -0.25]
+
+
+def test_day_figure_is_written(tmp_path):
+    day = pd.Timestamp("2025-05-09", tz="UTC")
+    f = _fills(
+        [("2025-05-09 01:00", "buy", 2.0, 3.0, 0.5), ("2025-05-09 02:00", "sell", 1.0, 4.0, 0.25)]
+    )
+    h = pd.DataFrame({"exec_ms": [int(pd.Timestamp("2025-05-09 03:00", tz="UTC").value
+                                      // 10**6)], "exec_usd": [2400.0]})  # fmt: skip
+    t = pd.date_range(day, periods=1440, freq="1min")
+    idx = pd.Series(2400 + np.sin(np.arange(1440) / 100), index=t)
+    comps = pd.Series({k: float(i - 3) for i, k in enumerate(_GROUPS)})
+    p = tmp_path / "day.png"
+    nf.fig_day(f, h, idx, comps, day, p)
+    assert p.exists() and p.stat().st_size > 10_000
+
+
+def test_price_at_takes_the_last_value_at_or_before_each_time():
+    t = pd.date_range(pd.Timestamp("2025-05-09", tz="UTC"), periods=3, freq="1min")
+    idx = pd.Series([10.0, 20.0, 30.0], index=t)
+    ms = lambda s: int(pd.Timestamp(s, tz="UTC").value // 10**6)  # noqa: E731
+    got = nf.price_at(idx, np.array([ms("2025-05-09 00:00:30"), ms("2025-05-09 00:01"),
+                                     ms("2025-05-09 00:05")]))  # fmt: skip
+    assert got.tolist() == [10.0, 20.0, 30.0]
