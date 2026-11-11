@@ -172,9 +172,11 @@ def _vols(grid, vol, vol_after):
     return v
 
 
-def _market(cfg, vol=VOL, extra_refit_skip=(), b=0.0, rho=0.0, vol_after=None):
+def _market(cfg, vol=VOL, extra_refit_skip=(), b=0.0, rho=0.0, vol_after=None,
+            index_from=None):  # fmt: skip
     """60% ATM smile (flat unless b > 0), forward = index = 3000, refits every 5 min.
-    vol_after=(ts, vol): refits at or after ts use that ATM vol instead."""
+    vol_after=(ts, vol): refits at or after ts use that ATM vol instead.
+    index_from: first index/futures observation (default a day before START)."""
     step = cfg.surface.refit_interval_s
     grid = pd.date_range(START, END, freq=f"{step}s")
     t_ref = (EXP - grid).total_seconds() / (365 * 86400)
@@ -192,7 +194,8 @@ def _market(cfg, vol=VOL, extra_refit_skip=(), b=0.0, rho=0.0, vol_after=None):
             "s": 0.1,
         }
     )
-    obs_ts = pd.date_range(START - pd.Timedelta("1D"), END, freq="10min")
+    first = START - pd.Timedelta("1D") if index_from is None else index_from
+    obs_ts = pd.date_range(first, END, freq="10min")
     fut = pd.DataFrame(
         {
             "ts": obs_ts,

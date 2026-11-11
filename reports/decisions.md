@@ -486,3 +486,25 @@ Each entry: the choice, the alternative, why, and the parameter's category:
 - **Fix:** Deribit trade ids are one global sequence across all instruments, so trades are ordered by (ts, trade number) everywhere: the curve's index series, futures basis observations, option and perp loads, and the engine's event sort. The hand-check applies the same rule in its own SQL.
 - **Result:** hand-check 20/20, and a wider 200/200; a rerun of 6–12 Jan is byte-identical.
 - **Not rebuilt:** the Phase 2 priced cache and the Phase 3 surface cache. Each mark uses its own trade's index, so the tie only touches forward lookups at sub-tick precision.
+
+## D045 — Phase 8 results; replay start without an index print
+- **Category:** results (test period 2025-04-29 to 2025-06-30) plus a bug fix (2026-11-11)
+- **Selected on train:** half-spread 2 vol points, skew off (κ = 0), hedge band 10 ETH.
+- **Test results** (per day, paired against the baseline, ± 2 se):
+  - spread 2: +$991 ± 603;
+  - band 10: +$348 ± 102, the most precise result (lag-1 autocorrelation 0.38, so the bar is about 1.5× too narrow);
+  - skew off: −$1 ± 564;
+  - spread 0.5: −$478 ± 443;
+  - latency 1 s: −$153 ± 172;
+  - best: +$1,241 ± 908.
+- **Every variant loses money:** the baseline −$189k, best −$111k. Fills enter with 1.1–2.4 vol points of edge, but the delta-hedged 1 h markout is −0.4 to −1.1 vol points (adverse selection), and short gamma plus hedging costs exceed spread capture. The mechanism for each experiment is in `reports/phase8_mechanisms.md` (appended to `reports/phase8_results.md`).
+- **Bug found by the batch:** the training summaries had a NaN total.
+  - 2025-01-01 00:00 is the first instant of the data, so there is no index at the start; `w_start` was NaN, and the first waterfall step (to the first collateral hedge, about 5–20 s in) was NaN, which the flow fill-in read as 0.
+  - Effect on training: about 50 ETH × the first-minute move ≈ −$26 on day 1, identical in every variant (no options yet; the same collateral hedge). Selection is unchanged.
+  - Test runs start on 29 April, after earlier data, and were unaffected (residual ≈ 1e-9).
+- **Fix:**
+  - The replay starts at the first index print if there is none at the start. This is valid because only collateral exists before it and nothing can trade.
+  - A non-finite waterfall step now raises an error instead of reading as 0.
+  - The run summary's total comes from the replay, with `engine_minus_replay_usd` recorded as a check.
+  - Tests cover both cases and fail on the old code.
+- **Not rerun:** the five cached training runs (about 2 h on the laptop). Their `daily_pnl` differs from a fresh run only by that common ≈ $26 on day 1, and their `summary.json` totals are NaN. The cache key is the config hash, so to regenerate them, delete `data/runs/exp/train/`.

@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-from test_sim import EXP, _inputs, _market, _ms1, _perp, _trades
+from test_sim import EXP, START, _inputs, _market, _ms1, _perp, _trades
 
 from mm.pnl.attribution import COMPONENTS, attribute, waterfall
 from mm.pnl.markouts import markouts
@@ -175,3 +175,35 @@ def test_markout_uses_only_the_future_it_names(cfg):
     assert mk["hedged_5min"].iloc[0] - mk["hedged_0"].iloc[0] < 0.05 * v  # theta only
     assert mk["hedged_1h"].iloc[0] - mk["hedged_0"].iloc[0] > 4 * v  # ~ +5 vol points
     assert att.rows["vega"].sum() == pytest.approx(5 * v, rel=0.05)
+
+
+def test_start_without_an_index_print_values_from_the_first_print(cfg):
+    # 2025-01-01 00:00 is the first instant of the data, so there is no index at the start.
+    # The replay must start at the first print, not make the first step NaN (which the
+    # flow fill-in would then have read as 0).
+    first = START + pd.Timedelta(seconds=30)
+    trades = _trades([("2025-01-06 12:00:30", "sell", 0.0001, 4)])
+    inp, res, att, md = _run_and_attribute(cfg, trades, index_from=first)
+    assert np.isnan(md.index(inp.start_ms))
+    assert att.w_start == pytest.approx(cfg.sim.initial_eth * S, rel=1e-12)
+    assert np.isfinite(att.rows[COMPONENTS].to_numpy()).all()
+    assert att.rows[COMPONENTS].to_numpy().sum() == pytest.approx(att.w_end - att.w_start,
+                                                                   abs=1e-6)  # fmt: skip
+    snaps = att.snapshots
+    assert np.allclose(snaps["engine_w"], snaps["replay_w"], atol=1e-6)
+
+
+def test_a_non_finite_waterfall_step_raises(cfg):
+    trades = _trades([("2025-01-06 12:00:30", "sell", 0.0001, 4)])
+    book, curve = _market(cfg)
+    inp = _inputs(cfg, trades, book, curve)
+    res = run(inp, cfg)
+
+    class Gap(MarketData):  # the index disappears for one minute after the fill
+        def index(self, ts_ms):
+            gap = _ms1("2025-01-06 13:00") <= ts_ms < _ms1("2025-01-06 13:01")
+            return np.nan if gap else super().index(ts_ms)
+
+    with pytest.raises(ValueError, match="non-finite waterfall"):
+        attribute(res.fills, res.hedges, res.ledger, res.daily, Gap(inp.book, inp.curve, None),
+                  cfg.sim.initial_eth, inp.start_ms, inp.end_ms)  # fmt: skip

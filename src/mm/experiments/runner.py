@@ -87,8 +87,10 @@ def run_variant(cfg: Config, start: str, end: str, out: Path) -> dict:
     vega_mk = (mk["qty"] * mk["vega_usd"]).sum() if len(mk) else 0.0
     summ = {
         "hash": h, "start": start, "end": end,
-        "total": float(snaps["engine_w"].iloc[-1] - att.w_start) if len(snaps) else 0.0,
-        "residual": float((snaps["engine_w"].iloc[-1] - att.w_start) - daily["total"].sum())
+        "total": float(att.w_end - att.w_start),
+        "residual": float(att.w_end - att.w_start - daily["total"].sum()),
+        # the replay must reproduce the engine's own valuation at the last snapshot
+        "engine_minus_replay_usd": float(snaps["engine_w"].iloc[-1] - snaps["replay_w"].iloc[-1])
         if len(snaps) else 0.0,
         "fills": len(res.fills),
         "contracts": float(res.fills["qty"].sum()) if len(res.fills) else 0.0,

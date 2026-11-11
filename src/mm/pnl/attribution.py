@@ -171,6 +171,15 @@ def attribute(fills, hedges, ledger, daily, md: MarketData, initial_eth: float,
     acct = Account(initial_eth)
     bk = acct.book()
     m = md.at(start_ms, bk)
+    if not np.isfinite(m.s):
+        # No index print at or before start_ms (2025-01-01 00:00 is the first instant of
+        # the data). Until one arrives the account is collateral only, with no USD value
+        # and nothing can trade, so the measurement starts at the first print.
+        t_open = md.first_index_ms(start_ms)
+        if t_open is None or (ev and ev[0].ts < t_open):
+            raise ValueError(f"no index at {start_ms} and events before the first print")
+        m = md.at(t_open, bk)
+        pts = pts[pts > t_open]
     w_start = value_usd(bk, m)
     rows, fill_rows, snap_rows = [], [], []
     j = 0
@@ -178,6 +187,8 @@ def attribute(fills, hedges, ledger, daily, md: MarketData, initial_eth: float,
         t = int(t)
         m1 = md.at(t, bk, prev=m)
         wf = waterfall(bk, m, m1)
+        if not all(np.isfinite(wf[k]) for k in ("theta", "delta", "gamma", "basis", "vega")):
+            raise ValueError(f"non-finite waterfall step at {t}")  # never read NaN as 0
         rows.append({"ts_ms": t, "kind": "market", **{k: wf[k] for k in
                      ("theta", "delta", "gamma", "basis", "vega")}, "w": wf["w1"]})  # fmt: skip
         m = m1

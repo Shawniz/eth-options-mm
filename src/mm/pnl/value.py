@@ -163,6 +163,12 @@ class MarketData:
     def index(self, ts_ms: int) -> float:
         return self.curve.index_at(int(ts_ms), inclusive=True)
 
+    def first_index_ms(self, ts_ms: int) -> int | None:
+        """Time of the first index print at or after ts_ms (None if there is none)."""
+        t = self.curve.activity_ms
+        j = int(np.searchsorted(t, int(ts_ms), side="left"))
+        return int(t[j]) if j < len(t) else None
+
     def mark(self, ts_ms: int) -> float:
         j = np.searchsorted(self._p_ts, ts_ms, side="right") - 1
         return float(self._p_mark[j]) if j >= 0 else np.nan
